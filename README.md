@@ -75,7 +75,12 @@ Builds one HTML page with two tabs:
   geography. Buttons toggle fuel stations, bridges and tunnels (off, on, or on
   with length), segment distances (`Afstanden`, on by default) and points of
   interest (`★ Bezienswaardigheden`, on by default). The distances come from
-  `Distance (km)`. Lines never cross: after the layout, each detour's lane is
+  `Distance (km)`. On segments with fuel stations, the distance of each stretch
+  (junction → station → station → junction, in travel direction) is shown in
+  smaller italic teal text, while both `Afstanden` and `Tankstations` are on.
+  These use the column `OSM DistanceFromStart (km)` in the Points tab when
+  `osm_point_leg_distances.py` has filled it, and otherwise `PositionOnEdge` ×
+  the segment's `Distance (km)`. Lines never cross: after the layout, each detour's lane is
   re-chosen to remove crossings.
 
 ```bash
@@ -111,7 +116,8 @@ route tab directly.
    if given).
 2. **Fixed branches:** `DEFAULT_BRANCHES` at the top of `mapmaking.py`,
    currently the A3/A7 corridor Kerpen → Köln-West → Frankfurter Kreuz →
-   Biebelried → Feuchtwangen/Crailsheim → Ulm/Elchingen. These are always drawn.
+   Biebelried → Feuchtwangen/Crailsheim → Ulm/Elchingen, and the A81
+   Weinsberg → Leonberg. These are always drawn.
    Add a line there for other routes you always want to see.
 3. **Automatic branches:** up to `--branches-per-leg`. The script collects up to
    400 candidate routes within `--margin`. One at a time, the candidate adding the

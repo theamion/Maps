@@ -53,6 +53,8 @@ MAP_POI_R = 6.0           # map: point-of-interest star radius
 MAP_MAX_ZOOM = 16         # map: max zoom - POINT_FONT * 16 = 72px text
 GRAPH_POINT_FONT = 10     # route diagram: point label size, in SVG units
 GRAPH_DIST_FONT = 10      # route diagram: segment distance label size
+GRAPH_FUEL_DIST_FONT = 8  # route diagram: distances between fuel stations
+FUEL_DIST_COLOUR = '#12806E'
 GRAPH_JUNCTION_FONT = 14  # route diagram: junction name size
 GRAPH_ROAD_FONT = 13      # route diagram: road number size
 GRAPH_FUEL_HALF = 5.0     # route diagram: half the size of a fuel-station square
@@ -2056,6 +2058,7 @@ MAX_LOCAL_SHARE = 0.25    # at most this share of a branch's detour may be Local
 # --no-default-branches turns them off.
 DEFAULT_BRANCHES = [
     ["Kerpen", "Köln-West", "Frankfurter Kreuz", "Biebelried", "Feuchtwangen/Crailsheim", "Ulm/Elchingen"],  # A3/A7
+    ["Weinsberg", "Leonberg"],  # A81
 ]
 
 HIERARCHY_WIDTH = {"Primary": 5.0, "Secondary": 4.0, "Connector": 3.0, "Local": 2.2}
@@ -2136,6 +2139,8 @@ def load_data(xlsx_path):
             seg_by_pair[key] = rec
 
     points_by_edge = defaultdict(list)
+    pts_header = [c.value for c in wb["Points"][1]]
+    from_start_col = pts_header.index("OSM DistanceFromStart (km)") if "OSM DistanceFromStart (km)" in pts_header else None
     for row in wb["Points"].iter_rows(min_row=2, values_only=True):
         if not row[0] or not row[9]:
             continue
@@ -2148,6 +2153,7 @@ def load_data(xlsx_path):
             id=row[0], name=row[1], category=row[2], sides=row[5],
             lat=row[6], lon=row[7], edge_id=row[9], pos=row[10] or 0.5,
             order=row[11] or 0, brand=row[12], facilities=row[13], length_m=length_m,
+            from_start_km=row[from_start_col] if from_start_col is not None else None,
         ))
     for eid in points_by_edge:
         points_by_edge[eid].sort(key=lambda p: (p["pos"], p["order"] or 0))
@@ -2582,6 +2588,7 @@ def render_graph(junctions, seg_by_pair, points_by_edge, node_x, node_lane, edge
         incoming_canonical[v] = seg["canonical"] if seg else "?"
 
     placer = LabelPlacer()
+    pending_fuel_legs = []   # (x, y, line start/end, km) of each stretch between fuel stations
     pending_points = []   # (x, y, line angle, point) - labels placed after all obstacles are known
     svg_lines = []
     svg_points = []
@@ -2626,6 +2633,7 @@ def render_graph(junctions, seg_by_pair, points_by_edge, node_x, node_lane, edge
         # --- points along this edge ---
         if seg:
             reversed_dir = seg["from_id"] != u
+            fuel_stops = []   # (fraction along the drawn line, km from its start)
             for pt in points_by_edge.get(seg["edge_id"], []):
                 frac = pt["pos"] if not reversed_dir else (1 - pt["pos"])
                 px_pt = x1 + frac * (x2 - x1)
@@ -2637,6 +2645,10 @@ def render_graph(junctions, seg_by_pair, points_by_edge, node_x, node_lane, edge
                     placer.add_box((px_pt - GRAPH_FUEL_HALF, py_pt - GRAPH_FUEL_HALF,
                                     px_pt + GRAPH_FUEL_HALF, py_pt + GRAPH_FUEL_HALF))
                     pending_points.append((px_pt, py_pt, line_angle, pt))
+                    km = pt.get("from_start_km")
+                    km = (frac * seg["distance_km"] if km is None
+                          else (km if not reversed_dir else seg["distance_km"] - km))
+                    fuel_stops.append((frac, km))
                 elif pt["category"] == "poi":
                     placer.add_box((px_pt - GRAPH_POI_R, py_pt - GRAPH_POI_R,
                                     px_pt + GRAPH_POI_R, py_pt + GRAPH_POI_R))
@@ -2645,6 +2657,12 @@ def render_graph(junctions, seg_by_pair, points_by_edge, node_x, node_lane, edge
                     placer.add_box((px_pt - GRAPH_BRIDGE_R, py_pt - GRAPH_BRIDGE_R,
                                     px_pt + GRAPH_BRIDGE_R, py_pt + GRAPH_BRIDGE_R))
                     pending_points.append((px_pt, py_pt, line_angle, pt))
+            # legs junction -> fuel station -> ... -> junction, in travel order
+            if fuel_stops:
+                stops = [(0.0, 0.0)] + sorted(fuel_stops) + [(1.0, seg["distance_km"])]
+                for (fa, ka), (fb, kb) in zip(stops, stops[1:]):
+                    fm = (fa + fb) / 2
+                    pending_fuel_legs.append((x1 + fm * (x2 - x1), y1 + fm * (y2 - y1), x1, y1, x2, y2, kb - ka))
 
     # --- junction circles ---
     for n in node_x:
@@ -2746,6 +2764,24 @@ def render_graph(junctions, seg_by_pair, points_by_edge, node_x, node_lane, edge
         else:
             svg_points.append(_bridge_marker(it["x"], it["y"], it["pt"], box, leader))
 
+    # --- distances between fuel stations (shown with both "Afstanden" and
+    # "Tankstations" on): smaller, italic, own colour ---
+    svg_fuel_legs = []
+    for mx, my, x1, y1, x2, y2, km in pending_fuel_legs:
+        text = f"{km:.1f} km"
+        w, h = text_width(text, GRAPH_FUEL_DIST_FONT), GRAPH_FUEL_DIST_FONT * LINE_HEIGHT
+        normal = math.degrees(math.atan2(y2 - y1, x2 - x1)) + 90
+        nxc, nyc = math.cos(math.radians(normal)), math.sin(math.radians(normal))
+        pref = (1 if nxc > 0 else -1) if abs(nxc) > abs(nyc) else (1 if nyc < 0 else -1)
+        box, leader = placer.place(mx, my, w, h, normal, pref_side=pref, clear=3.0)
+        line = ""
+        if leader:
+            ex, ey = nearest_on_box(mx, my, box)
+            line = f'<line class="leader" x1="{mx:.1f}" y1="{my:.1f}" x2="{ex:.1f}" y2="{ey:.1f}"/>'
+        svg_fuel_legs.append(
+            f'<g class="fuel-dist">{line}<text x="{box[0]:.1f}" y="{box[1] + GRAPH_FUEL_DIST_FONT * BASELINE:.1f}">'
+            f'{text}</text></g>')
+
     # --- segment distances (toggle "Afstanden"): placed last, beside the
     # middle of each line on the side away from the point-label columns ---
     svg_dists = []
@@ -2775,7 +2811,8 @@ def render_graph(junctions, seg_by_pair, points_by_edge, node_x, node_lane, edge
         f'viewBox="0 0 {width:.0f} {height:.0f}" xmlns="http://www.w3.org/2000/svg">'
         f'<rect width="100%" height="100%" fill="#fbfaf6"/>'
         + "".join(svg_lines) + "".join(svg_road_labels) + "".join(svg_points)
-        + "".join(svg_nodes) + "".join(svg_labels) + "".join(svg_dists) + "".join(svg_pois)
+        + "".join(svg_nodes) + "".join(svg_labels) + "".join(svg_dists) + "".join(svg_fuel_legs)
+        + "".join(svg_pois)
         + "</svg>"
     )
     return svg, width, height, placer.stats
@@ -2868,6 +2905,10 @@ HTML_TEMPLATE = """<!DOCTYPE html>
                 paint-order:stroke; stroke:#fbfaf6; stroke-width:2.8px; stroke-linejoin:round; }}
   .dist-label {{ display:none; }}
   #stage.distances-on .dist-label {{ display:block; }}
+  .fuel-dist {{ display:none; }}
+  #stage.distances-on.points-visible .fuel-dist {{ display:block; }}
+  .fuel-dist text {{ font-size:{fuel_dist_font}px; font-style:italic; fill:{fuel_dist_colour};
+                     paint-order:stroke; stroke:#fbfaf6; stroke-width:2.4px; stroke-linejoin:round; }}
   .dist-label text {{ font-size:{dist_font}px; font-weight:700; fill:#185FA5;
                       paint-order:stroke; stroke:#fbfaf6; stroke-width:2.8px; stroke-linejoin:round; }}
   #controls {{ position:absolute; top:12px; right:12px; z-index:5; display:flex; flex-direction:column; gap:6px; }}
@@ -3033,7 +3074,7 @@ def build_graph_page(xlsx_path=DEFAULT_XLSX, start_name=DEFAULT_FROM,
         title=_esc(title), svg=svg,
         route_count=leg_count + 1, shortest_km=main_length, margin_pct=margin * 100,
         point_font=GRAPH_POINT_FONT, dist_font=GRAPH_DIST_FONT, junction_font=GRAPH_JUNCTION_FONT,
-        poi_text=POI_TEXT,
+        poi_text=POI_TEXT, fuel_dist_font=GRAPH_FUEL_DIST_FONT, fuel_dist_colour=FUEL_DIST_COLOUR,
         max_zoom=GRAPH_MAX_ZOOM,
     )
     return html, dict(
