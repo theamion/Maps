@@ -1,0 +1,3 @@
+# workbooks (data) and OSM caches stay local
+*.xlsx
+osm_*_cache.json
