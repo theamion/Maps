@@ -21,6 +21,24 @@ in the script's own folder, whichever directory you run it from.
 | `osm_junction_cache.json`, `osm_segment_cache.json` | Caches for the OSM checks, so runs can resume |
 | `generate_map_v2.deprecatedpy`, `generate_graph.deprecatedpy` | Superseded by `mapmaking.py`. Kept for reference only |
 
+## Publishing
+
+The map is published with GitHub Pages at
+**https://theamion.github.io/Maps/holidays.html**, from the `main` branch of
+https://github.com/theamion/Maps.
+
+A git hook in `githooks/pre-commit` runs `mapmaking.py` before every commit on
+`main` and adds the fresh `holidays.html` to that commit. So a normal commit and
+push (also from VS Code) updates the page, usually live within a minute or two.
+
+- In a new clone, turn the hook on once with `git config core.hooksPath githooks`.
+- Skip it for one commit with `git commit --no-verify`.
+- If `mapmaking.py` fails (for example because the workbook is missing), the
+  commit is stopped.
+
+The workbooks and OSM caches are in `.gitignore`, so they stay local. Only the
+generated page shows their data.
+
 ## Requirements
 
 - Python 3

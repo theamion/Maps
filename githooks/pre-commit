@@ -1,0 +1,16 @@
+#!/bin/sh
+# Rebuilds holidays.html with mapmaking.py before every commit on main and
+# adds it to that commit, so each push to main publishes the current map on
+# GitHub Pages. Enabled with:  git config core.hooksPath githooks
+# Skip it once with:           git commit --no-verify
+
+branch=$(git symbolic-ref --short HEAD 2>/dev/null)
+[ "$branch" = "main" ] || exit 0
+
+root=$(git rev-parse --show-toplevel)
+echo "pre-commit: rebuilding holidays.html ..."
+if ! python3 "$root/mapmaking.py" --output "$root/holidays.html" > /dev/null; then
+    echo "pre-commit: mapmaking.py failed, commit stopped (use --no-verify to commit without the page)." >&2
+    exit 1
+fi
+git add "$root/holidays.html"
