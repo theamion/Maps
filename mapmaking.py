@@ -48,16 +48,23 @@ DEFAULT_OUTPUT = os.path.join(SCRIPT_DIR, 'holidays.html')
 
 POINT_FONT = 4.5          # map: point name size, in SVG units
 POINT_SUB_FONT = 3.8      # map: second line (bridge length / fuel brand)
+MAP_POI_FONT = 5.5        # map: point-of-interest name size
+MAP_POI_R = 6.0           # map: point-of-interest star radius
 MAP_MAX_ZOOM = 16         # map: max zoom - POINT_FONT * 16 = 72px text
-GRAPH_POINT_FONT = 7.5    # route diagram: point label size, in SVG units
-GRAPH_DIST_FONT = 7.5     # route diagram: segment distance label size
+GRAPH_POINT_FONT = 10     # route diagram: point label size, in SVG units
+GRAPH_DIST_FONT = 10      # route diagram: segment distance label size
+GRAPH_JUNCTION_FONT = 14  # route diagram: junction name size
+GRAPH_ROAD_FONT = 13      # route diagram: road number size
+GRAPH_FUEL_HALF = 5.0     # route diagram: half the size of a fuel-station square
+GRAPH_BRIDGE_R = 4.0      # route diagram: bridge/tunnel dot radius
+GRAPH_POI_R = 9.0         # route diagram: point-of-interest star radius
 GRAPH_MAX_ZOOM = 12
 LINE_HEIGHT = 1.2         # line box height as a multiple of the font size
 BASELINE = 0.93           # baseline offset from the top of a line box
 
 GRAPH_BRIDGE_CATEGORIES = ("brug (rivier)", "brug (dal)", "Brug", "tunnel", "ecoduct")
 # placement order: the first placed get the closest spots
-LABEL_PRIORITY = {'tankstation': 0, 'autohof': 0, 'tunnel': 1, 'brug (rivier)': 2,
+LABEL_PRIORITY = {'poi': -1, 'tankstation': 0, 'autohof': 0, 'tunnel': 1, 'brug (rivier)': 2,
                   'ecoduct': 3, 'brug': 4, 'brug (dal)': 5}
 
 _NARROW = set("iljtfrI.,:;'|!()[]- ")
@@ -143,17 +150,28 @@ class LabelPlacer:
             if text:
                 self._texts[k].append(box)
 
-    def add_rotated_box(self, ox, oy, angle_deg, lx, ly, w, h, text=True):
+    @staticmethod
+    def rotated_boxes(ox, oy, angle_deg, lx, ly, w, h):
         """A rotated rectangle ([lx, lx+w] x [ly, ly+h] in a frame rotated by
         angle_deg around (ox, oy)), as a chain of small axis-aligned boxes."""
         a = math.radians(angle_deg)
         ca, sa = math.cos(a), math.sin(a)
         n = max(1, int(math.ceil(w / max(h, 1.0))))
+        boxes = []
         for i in range(n):
             x0, x1 = lx + w * i / n, lx + w * (i + 1) / n
             pts = [(ox + x * ca - y * sa, oy + x * sa + y * ca) for x in (x0, x1) for y in (ly, ly + h)]
-            self.add_box((min(p[0] for p in pts), min(p[1] for p in pts),
-                          max(p[0] for p in pts), max(p[1] for p in pts)), text=text)
+            boxes.append((min(p[0] for p in pts), min(p[1] for p in pts),
+                          max(p[0] for p in pts), max(p[1] for p in pts)))
+        return boxes
+
+    def add_rotated_box(self, ox, oy, angle_deg, lx, ly, w, h, text=True):
+        for box in self.rotated_boxes(ox, oy, angle_deg, lx, ly, w, h):
+            self.add_box(box, text=text)
+
+    def boxes_free(self, boxes, avoid_lines=False):
+        """None of these boxes overlaps anything placed (nor, optionally, a line)?"""
+        return not any(self._hits_box(b, None) or (avoid_lines and self._hits_line(b)) for b in boxes)
 
     def add_polyline(self, poly):
         for (x1, y1), (x2, y2) in zip(poly, poly[1:]):
@@ -339,6 +357,62 @@ def cur_top(cluster, gap):
         o += hgt + gap
     cluster['top'] = sum(i - off for i, off in zip(cluster['ideal'], offsets)) / len(offsets)
     return cluster['top']
+
+
+# ======================================================================
+# Shared: points of interest (sheet 'Points of Interest')
+# ======================================================================
+
+POI_FILL = '#F5B301'      # gold star
+POI_STROKE = '#7A4F00'
+POI_TEXT = '#7A4F00'
+
+
+def load_pois(wb, junctions, seg_ends):
+    """Points of interest with a known segment. Each gets `frac`: where its
+    lat/lon projects onto the straight line between the segment's From
+    and To junction (0 = From, 1 = To), so it can be drawn on that
+    segment's line in either view. seg_ends: edge id -> (from id, to id)."""
+    if 'Points of Interest' not in wb.sheetnames:
+        return []
+    ws = wb['Points of Interest']
+    header = [c.value for c in ws[1]]
+    idx = {h: i for i, h in enumerate(header)}
+    if 'Segment' not in idx:
+        return []
+    pois = []
+    for row in ws.iter_rows(min_row=2, values_only=True):
+        name, eid = row[idx['Name']], row[idx['Segment']]
+        lat, lon = row[idx.get('Latitude')], row[idx.get('Longitude')]
+        if not name or eid not in seg_ends or lat is None or lon is None:
+            continue
+        a, b = junctions.get(seg_ends[eid][0]), junctions.get(seg_ends[eid][1])
+        if not a or not b or a.get('lat') is None or b.get('lat') is None:
+            continue
+        cos_lat = math.cos(math.radians(lat))
+        ax, ay, bx, by = a['lon'] * cos_lat, a['lat'], b['lon'] * cos_lat, b['lat']
+        dx, dy = bx - ax, by - ay
+        t = ((lon * cos_lat - ax) * dx + (lat - ay) * dy) / ((dx * dx + dy * dy) or 1.0)
+        pois.append(dict(name=str(name), category=row[idx['Category']] if 'Category' in idx else None,
+                         notes=row[idx['Notes']] if 'Notes' in idx else None,
+                         edge_id=eid, frac=min(0.95, max(0.05, t))))
+    return pois
+
+
+def star_svg(cx, cy, r, cls):
+    """A five-pointed star centred on (cx, cy)."""
+    pts = []
+    for k in range(10):
+        rad = r if k % 2 == 0 else r * 0.45
+        a = math.radians(-90 + k * 36)
+        pts.append(f"{cx + rad * math.cos(a):.1f},{cy + rad * math.sin(a):.1f}")
+    return (f'<polygon class="{cls}" points="{" ".join(pts)}" fill="{POI_FILL}" '
+            f'stroke="{POI_STROKE}" stroke-width="{max(0.5, r * 0.12):.2f}" stroke-linejoin="round"/>')
+
+
+def poi_title(poi):
+    parts = [poi['name']] + [str(v) for v in (poi.get('category'), poi.get('notes')) if v]
+    return html_lib.escape(' - '.join(parts), quote=False)
 
 
 def marker_extent(sx, sy, ang, cat, sides, side, length_m):
@@ -1282,7 +1356,7 @@ def river_bow_control(a, b, road_polylines, max_tries=12):
 
 
 def render_map(junctions, segments, pos, roads, points, border_data, border_node_pos,
-                river_data=None, ambiguous_crossings=None, tube_style_hierarchies=None):
+                river_data=None, ambiguous_crossings=None, tube_style_hierarchies=None, pois=None):
     """Assembles the SVG following the render order in spec section 16:
     background, borders, rivers, local -> connector -> secondary -> primary
     roads, road points, normal junctions/exits, border crossings,
@@ -1418,7 +1492,18 @@ def render_map(junctions, segments, pos, roads, points, border_data, border_node
     for poly in river_sampled_polys:
         placer.add_polyline([(X(x), Y(y)) for x, y in poly])
 
+    # point-of-interest stars first, so junction names are placed around them
     occupied_label_boxes = []
+    poi_positions = []
+    for poi in pois or []:
+        poly = polylines.get(poi['edge_id'])
+        if not poly:
+            continue
+        (px, py), ang = point_at_fraction_on_polyline(poly, poi['frac'])
+        sx, sy, r = X(px), Y(py), MAP_POI_R
+        poi_positions.append((poi, sx, sy, ang))
+        occupied_label_boxes.append((sx - r, sy - r, sx + r, sy + r))
+
     tier_order = {'Large': 0, 'Medium': 1, 'Small': 2}
     normal_junctions = [(jid, j) for jid, j in junctions.items()
                         if jid in pos and j['jtype'] not in ('BorderCrossing', 'Tripoint')]
@@ -1464,6 +1549,17 @@ def render_map(junctions, segments, pos, roads, points, border_data, border_node
             point_marks.append(dict(p=p, sx=sx, sy=sy, ang=ang, cat=cat, side=side,
                                     box=box, reach=reach))
 
+    # points of interest: a star on their segment's line (drawn on top of
+    # the roads), labelled first so they get the closest spots
+    poi_star_svg = []
+    for poi, sx, sy, ang in poi_positions:
+        r = MAP_POI_R
+        box = (sx - r, sy - r, sx + r, sy + r)
+        placer.add_box(box)
+        point_marks.append(dict(p=dict(name=poi['name']), sx=sx, sy=sy, ang=ang, cat='poi', side=1,
+                                box=box, reach=r + 0.8))
+        poi_star_svg.append(f'<g class="poi"><title>{poi_title(poi)}</title>{star_svg(sx, sy, r, "poi-star")}</g>')
+
     point_label_svg = []
     point_leader_svg = []
     for pm in sorted(point_marks, key=lambda pm: (LABEL_PRIORITY.get(pm['cat'], 9),
@@ -1472,7 +1568,10 @@ def render_map(junctions, segments, pos, roads, points, border_data, border_node
         if not p['name']:
             continue
         lines = [(p['name'], POINT_FONT, '#4A4A47', '')]
-        if cat in BAR_CATEGORIES:
+        if cat == 'poi':
+            group_class = 'poi'
+            lines = [(p['name'], MAP_POI_FONT, POI_TEXT, 'poi-name')]
+        elif cat in BAR_CATEGORIES:
             group_class = 'zoom-point-label bridge-label'
             if p.get('length_m'):
                 lines.append((f"{p['length_m']:.0f}m", POINT_SUB_FONT, '#7A7A76', 'bridge-length-label'))
@@ -1591,6 +1690,7 @@ def render_map(junctions, segments, pos, roads, points, border_data, border_node
 
     # point labels on top of everything else (their halo keeps them
     # readable where they have to cross a line)
+    parts.extend(poi_star_svg)
     parts.extend(point_leader_svg)
     parts.extend(point_label_svg)
 
@@ -1633,6 +1733,7 @@ def build_map(xlsx_path=DEFAULT_XLSX, title="Geographic Spine Map", tube_style_h
     pos = light_relaxation_pass(pos, junctions, connected_pairs)
 
     points = load_points_v2(wb, junctions)
+    pois = load_pois(wb, junctions, {s['edge_id']: (s['from'], s['to']) for s in segments})
 
     # river positions: project River Junctions geographically the same way,
     # snap bridge-point positions from the already-built road polylines
@@ -1682,7 +1783,7 @@ def build_map(xlsx_path=DEFAULT_XLSX, title="Geographic Spine Map", tube_style_h
     svg, road_colours, width, height, segments_geo, label_stats = render_map(
         junctions, segments, pos, roads, points, border_data or {}, border_node_pos,
         river_data={'segments': river_segs, 'pos': river_pos} if river_segs else None,
-        ambiguous_crossings=ambiguous, tube_style_hierarchies=tube_style_hierarchies,
+        ambiguous_crossings=ambiguous, tube_style_hierarchies=tube_style_hierarchies, pois=pois,
     )
     segments_geo_json = json.dumps(segments_geo)
 
@@ -1713,6 +1814,10 @@ def build_map(xlsx_path=DEFAULT_XLSX, title="Geographic Spine Map", tube_style_h
   /* segment/point distances - own zoom-gated toggle, off by default */
   .dist-label {{ display:none; }}
   #stage.labels-visible.distances-on .dist-label {{ display:block; }}
+  /* points of interest: own toggle, visible at every zoom level */
+  .poi {{ display:none; }}
+  #stage.pois-on .poi {{ display:block; }}
+  .poi-name {{ font-weight:bold; }}
 </style>
 </head><body>
 <div id="controls">
@@ -1722,9 +1827,10 @@ def build_map(xlsx_path=DEFAULT_XLSX, title="Geographic Spine Map", tube_style_h
   <button id="debugToggle" title="Debug aan/uit">D</button>
   <button id="bridgeToggle" title="Brug/tunnel namen">B</button>
   <button id="distToggle" title="Afstanden aan/uit">Km</button>
+  <button id="poiToggle" class="active" title="Bezienswaardigheden aan/uit">&#9733;</button>
   <button id="gpsToggle" title="Mijn locatie volgen">&#128205;</button>
 </div>
-<div id="wrap"><div id="stage">{svg}</div></div>
+<div id="wrap"><div id="stage" class="pois-on">{svg}</div></div>
 <script>
 (function() {{
   const wrap = document.getElementById('wrap');
@@ -1818,6 +1924,10 @@ def build_map(xlsx_path=DEFAULT_XLSX, title="Geographic Spine Map", tube_style_h
   }};
   document.getElementById('distToggle').onclick = function() {{
     stage.classList.toggle('distances-on');
+    this.classList.toggle('active');
+  }};
+  document.getElementById('poiToggle').onclick = function() {{
+    stage.classList.toggle('pois-on');
     this.classList.toggle('active');
   }};
 
@@ -1926,7 +2036,7 @@ def build_map(xlsx_path=DEFAULT_XLSX, title="Geographic Spine Map", tube_style_h
         'roads': len(road_colours), 'borders': len(border_data.get('segments', [])) if border_data else 0,
         'primary_moved_to_cap': len(moved_primary), 'secondary_moved_to_cap': len(moved_secondary),
         'ambiguous_border_crossings': ambiguous,
-        'width': width, 'height': height, 'point_labels': label_stats,
+        'width': width, 'height': height, 'pois': len(pois), 'point_labels': label_stats,
     }
 
 
@@ -1940,11 +2050,18 @@ DEFAULT_MARGIN = 0.5      # allow alternate branches up to 50% longer than the s
 MAX_PATHS = 12            # hard cap on number of accepted alternate routes (readability)
 MAX_CANDIDATES = 400      # safety cap on how many candidate paths Yen's algorithm may examine
 MIN_NOVEL_KM = 3.0        # a candidate path must add at least this much genuinely new road to be worth a branch
+MAX_LOCAL_SHARE = 0.25    # at most this share of a branch's detour may be Local road (e.g. a B-road)
+# branches always drawn in the route diagram, before the automatically found ones: each
+# is the list of junction names it must pass, in order. --branch replaces these,
+# --no-default-branches turns them off.
+DEFAULT_BRANCHES = [
+    ["Kerpen", "Köln-West", "Frankfurter Kreuz", "Biebelried", "Feuchtwangen/Crailsheim", "Ulm/Elchingen"],  # A3/A7
+]
 
 HIERARCHY_WIDTH = {"Primary": 5.0, "Secondary": 4.0, "Connector": 3.0, "Local": 2.2}
 TIER_RADIUS = {"Small": 5.0, "Medium": 8.0, "Large": 12.0}
-LANE_HEIGHT = 46.0   # px per lane, downward
-STEP_X = 70.0        # px per ordinal hop
+LANE_HEIGHT = 90.0   # px per lane, downward
+STEP_X = 110.0       # px per ordinal hop
 MARGIN_PX = 60
 
 ROAD_PALETTE = [
@@ -2035,6 +2152,13 @@ def load_data(xlsx_path):
     for eid in points_by_edge:
         points_by_edge[eid].sort(key=lambda p: (p["pos"], p["order"] or 0))
 
+    # points of interest ride along as points with category 'poi'
+    for poi in load_pois(wb, junctions, {sg["edge_id"]: (sg["from_id"], sg["to_id"]) for sg in segments}):
+        points_by_edge[poi["edge_id"]].append(dict(
+            id=None, name=poi["name"], category="poi", sides=None, lat=None, lon=None,
+            edge_id=poi["edge_id"], pos=poi["frac"], order=0, brand=None, facilities=None,
+            length_m=None, poi=poi))
+
     return junctions, segments, seg_by_pair, points_by_edge
 
 
@@ -2062,7 +2186,7 @@ def build_graph(junctions, segments):
         if G.has_edge(seg["from_id"], seg["to_id"]):
             if seg["distance_km"] >= G[seg["from_id"]][seg["to_id"]]["distance"]:
                 continue
-        G.add_edge(seg["from_id"], seg["to_id"], distance=seg["distance_km"])
+        G.add_edge(seg["from_id"], seg["to_id"], distance=seg["distance_km"], hierarchy=seg["hierarchy"])
     return G
 
 
@@ -2081,7 +2205,7 @@ def build_main_route(G, waypoint_ids):
     return route, total
 
 
-def find_leg_alternates(G, a, b, margin, max_branches, min_novel_km):
+def find_leg_alternates(G, a, b, margin, max_branches, min_novel_km, drawn_edges=None):
     """Alternative routes between two consecutive waypoints only (a 'leg'
     of the main trunk), so that alternatives are judged against the
     length of that leg, not the whole multi-hundred-km trip. This is what
@@ -2089,40 +2213,77 @@ def find_leg_alternates(G, a, b, margin, max_branches, min_novel_km):
     different pass) surface, instead of the search budget being spent on
     countless near-duplicate detours in whichever region happens to have
     the densest local road network."""
-    accepted, _ = find_routes(G, a, b, margin, max_paths=max_branches + 1, min_novel_km=min_novel_km)
+    accepted, _ = find_routes(G, a, b, margin, max_paths=max_branches + 1, min_novel_km=min_novel_km,
+                              drawn_edges=drawn_edges)
     return accepted[1:]  # [0] is the leg's own shortest path, already part of the main trunk
 
 
 def find_routes(G, source, target, margin, max_paths=MAX_PATHS, max_candidates=MAX_CANDIDATES,
-                 min_novel_km=MIN_NOVEL_KM):
-    """Yen's k-shortest simple loopless paths, filtered so every accepted
-    branch (a) never exceeds `margin` extra distance vs. the shortest route
-    and (b) contributes at least `min_novel_km` of road not already drawn —
-    this rejects the countless near-duplicate micro-detours a dense
-    motorway network otherwise offers (a different local slip road that is
-    a few hundred metres longer) and keeps only genuinely distinct
-    alternatives."""
-    accepted = []
-    drawn_edges = set()
+                 min_novel_km=MIN_NOVEL_KM, drawn_edges=None):
+    """Picks the most distinct alternative routes. Yen's k-shortest simple
+    paths supplies up to `max_candidates` candidates within `margin` of the
+    shortest route; then, one branch at a time, the candidate adding the
+    MOST road not yet drawn wins (ties: the shorter one). Picking by length
+    alone lets dozens of near-identical local variants (a different slip
+    road, a neighbouring junction) fill every slot before a genuinely
+    different corridor gets a turn. A branch must be ONE detour - leave the
+    drawn routes once and rejoin once, so no branch stacks unrelated
+    detours - of at least `min_novel_km`, with at most MAX_LOCAL_SHARE of
+    it on Local roads (a country road is not a motorway alternative).
+    `drawn_edges`: edges already drawn by other routes (e.g. fixed
+    branches), which count as not new."""
+    candidates = []
     shortest = None
-    gen = nx.shortest_simple_paths(G, source, target, weight="distance")
-    for i, path in enumerate(gen):
-        if i >= max_candidates or len(accepted) >= max_paths:
+    for i, path in enumerate(nx.shortest_simple_paths(G, source, target, weight="distance")):
+        if i >= max_candidates:
             break
         length = sum(G[u][v]["distance"] for u, v in zip(path, path[1:]))
         if shortest is None:
             shortest = length
         if length > shortest * (1 + margin):
             break
-        novel_km = sum(
-            G[u][v]["distance"] for u, v in zip(path, path[1:])
-            if frozenset((u, v)) not in drawn_edges
-        )
-        if accepted and novel_km < min_novel_km:
-            continue  # near-duplicate of an already accepted route, skip
+        candidates.append((path, length))
+    if not candidates:
+        return [], shortest
+
+    accepted = [candidates[0]]
+    drawn = set(drawn_edges or ())
+    drawn.update(frozenset(e) for e in zip(candidates[0][0], candidates[0][0][1:]))
+    remaining = candidates[1:]
+    while remaining and len(accepted) < max_paths:
+        best = None
+        for k, (path, length) in enumerate(remaining):
+            detours = _detours(path, drawn)
+            if len(detours) != 1:
+                continue
+            novel_km = sum(G[u][v]["distance"] for u, v in detours[0])
+            local_km = sum(G[u][v]["distance"] for u, v in detours[0] if G[u][v].get("hierarchy") == "Local")
+            if novel_km < min_novel_km or local_km > MAX_LOCAL_SHARE * novel_km:
+                continue
+            if best is None or (novel_km, -length) > (best[1], -best[2]):
+                best = (k, novel_km, length)
+        if best is None:
+            break
+        path, length = remaining.pop(best[0])
         accepted.append((path, length))
-        drawn_edges.update(frozenset((u, v)) for u, v in zip(path, path[1:]))
+        drawn.update(frozenset(e) for e in zip(path, path[1:]))
     return accepted, shortest
+
+
+def _detours(path, drawn):
+    """The stretches of `path` that leave the already-drawn edges, each as a
+    list of (u, v) edges."""
+    runs, cur = [], []
+    for u, v in zip(path, path[1:]):
+        if frozenset((u, v)) in drawn:
+            if cur:
+                runs.append(cur)
+                cur = []
+        else:
+            cur.append((u, v))
+    if cur:
+        runs.append(cur)
+    return runs
 
 
 # --------------------------------------------------------------------------
@@ -2206,6 +2367,7 @@ def layout_routes(accepted):
             depth += 1
 
     ordered_alternates = order_alternates_for_layout(accepted[1:])
+    runs = []                 # interior nodes of each detour, sharing one offset
 
     for path, _length in ordered_alternates:
         n = len(path)
@@ -2248,11 +2410,102 @@ def layout_routes(accepted):
                 frac = (k - attach_idx) / hop_count
                 node_x[path[k]] = x_attach + frac * (x_rejoin - x_attach)
                 node_lane[path[k]] = offset
+            if rejoin_idx > attach_idx + 1:
+                runs.append(path[attach_idx + 1:rejoin_idx])
             for k in range(attach_idx, rejoin_idx):
                 edges_drawn[frozenset((path[k], path[k + 1]))] = (path[k], path[k + 1])
             i = rejoin_idx
 
+    untangle_lanes(runs, node_x, node_lane, edges_drawn)
     return node_x, node_lane, edges_drawn
+
+
+LANE_CHOICES = sorted({s * d / 2 for s in (1, -1) for d in range(1, 9)}, key=lambda o: (abs(o), -o))
+
+
+def untangle_lanes(runs, node_x, node_lane, edges_drawn, passes=6):
+    """The lane rules above only look at where a branch LEAVES; one that
+    rejoins a line on the other side can still cross. So each detour's lane
+    is re-chosen (whole and half lanes, e.g. between the trunk and a branch)
+    to minimise, in order: crossings, then total distance from the trunk -
+    one detour at a time, repeated until nothing improves."""
+    edges = list(edges_drawn.values())
+
+    def cost():
+        return count_crossings(node_x, node_lane, edges), sum(abs(node_lane[r[0]]) for r in runs)
+
+    best = cost()
+    for _ in range(passes):
+        improved = False
+        for run in runs:
+            current = node_lane[run[0]]
+            for lane in LANE_CHOICES:
+                if lane == current:
+                    continue
+                for n in run:
+                    node_lane[n] = lane
+                c = cost()
+                if c < best:
+                    best, current, improved = c, lane, True
+                else:
+                    for n in run:
+                        node_lane[n] = current
+        if not improved:
+            break
+
+    # half lanes are cramped: renumber each side's lanes to 1, 2, 3... in the
+    # same order, and keep that only if it adds no crossings
+    before = {n: node_lane[n] for run in runs for n in run}
+    for side in (1, -1):
+        used = sorted({node_lane[r[0]] for r in runs if node_lane[r[0]] * side > 0}, key=abs)
+        remap = {lane: side * (i + 1) for i, lane in enumerate(used)}
+        for run in runs:
+            target = remap.get(node_lane[run[0]])
+            if target is not None:
+                for n in run:
+                    node_lane[n] = target
+    if count_crossings(node_x, node_lane, edges) > best[0]:
+        node_lane.update(before)
+    return count_crossings(node_x, node_lane, edges)
+
+
+def count_crossings(node_x, node_lane, edges):
+    """Pairs of drawn edges that cross, or run on top of each other, anywhere
+    other than at a junction they share."""
+    pts = {n: (node_x[n], node_lane[n]) for e in edges for n in e}
+
+    def orient(a, b, c):
+        v = (b[0] - a[0]) * (c[1] - a[1]) - (b[1] - a[1]) * (c[0] - a[0])
+        return 0 if abs(v) < 1e-9 else (1 if v > 0 else -1)
+
+    def on_seg(a, b, c):
+        return (min(a[0], b[0]) - 1e-9 <= c[0] <= max(a[0], b[0]) + 1e-9
+                and min(a[1], b[1]) - 1e-9 <= c[1] <= max(a[1], b[1]) + 1e-9)
+
+    n = 0
+    for i in range(len(edges)):
+        u1, v1 = edges[i]
+        a, b = pts[u1], pts[v1]
+        for j in range(i + 1, len(edges)):
+            u2, v2 = edges[j]
+            c, d = pts[u2], pts[v2]
+            if max(a[0], b[0]) < min(c[0], d[0]) or max(c[0], d[0]) < min(a[0], b[0]):
+                continue
+            o1, o2, o3, o4 = orient(a, b, c), orient(a, b, d), orient(c, d, a), orient(c, d, b)
+            shared = {u1, v1} & {u2, v2}
+            if shared:
+                if o1 == 0 and o2 == 0:          # collinear from the shared junction: overlap?
+                    s = next(iter(shared))
+                    p = pts[s]
+                    q1 = pts[v1 if u1 == s else u1]
+                    q2 = pts[v2 if u2 == s else u2]
+                    if (q1[0] - p[0]) * (q2[0] - p[0]) + (q1[1] - p[1]) * (q2[1] - p[1]) > 0:
+                        n += 1
+                continue
+            if (o1 != o2 and o3 != o4) or (o1 == 0 and on_seg(a, b, c)) or (o2 == 0 and on_seg(a, b, d)) \
+                    or (o3 == 0 and on_seg(c, d, a)) or (o4 == 0 and on_seg(c, d, b)):
+                n += 1
+    return n
 
 
 # --------------------------------------------------------------------------
@@ -2305,12 +2558,12 @@ def render_graph(junctions, seg_by_pair, points_by_edge, node_x, node_lane, edge
 
     if orientation == "vertical":
         def px(n):
-            return MARGIN_PX + 220 + (secondary[n] - min_s) * LANE_HEIGHT
+            return MARGIN_PX + 300 + (secondary[n] - min_s) * LANE_HEIGHT
 
         def py(n):
             return MARGIN_PX + (primary[n] - min_p) * STEP_X
 
-        width = MARGIN_PX * 2 + 220 + (max_s - min_s) * LANE_HEIGHT + 160
+        width = MARGIN_PX * 2 + 300 + (max_s - min_s) * LANE_HEIGHT + 260
         height = MARGIN_PX * 2 + (max_p - min_p) * STEP_X
     else:
         def px(n):
@@ -2319,7 +2572,7 @@ def render_graph(junctions, seg_by_pair, points_by_edge, node_x, node_lane, edge
         def py(n):
             return MARGIN_PX + 60 + (secondary[n] - min_s) * LANE_HEIGHT
 
-        width = MARGIN_PX * 2 + (max_p - min_p) * STEP_X + 220
+        width = MARGIN_PX * 2 + (max_p - min_p) * STEP_X + 300
         height = MARGIN_PX * 2 + 60 + (max_s - min_s) * LANE_HEIGHT
 
     # which canonical road "arrives" at each node, to detect where a road-number label is needed
@@ -2332,6 +2585,7 @@ def render_graph(junctions, seg_by_pair, points_by_edge, node_x, node_lane, edge
     pending_points = []   # (x, y, line angle, point) - labels placed after all obstacles are known
     svg_lines = []
     svg_points = []
+    svg_pois = []
     svg_nodes = []
     svg_labels = []
     svg_road_labels = []
@@ -2359,12 +2613,13 @@ def render_graph(junctions, seg_by_pair, points_by_edge, node_x, node_lane, edge
             angle = math.degrees(math.atan2(y2 - y1, x2 - x1))
             if angle > 90 or angle < -90:
                 angle += 180
-            placer.add_rotated_box(mx, my, angle, -1, -9, 6 + len(canon) * 6.4, 13)
+            rw, rh = 6 + len(canon) * GRAPH_ROAD_FONT * 0.62, GRAPH_ROAD_FONT * 1.25
+            placer.add_rotated_box(mx, my, angle, -1, -rh * 0.7, rw, rh)
             svg_road_labels.append(
                 f'<g transform="translate({mx:.1f} {my:.1f}) rotate({angle:.1f})">'
-                f'<rect x="-1" y="-9" width="{6 + len(canon) * 6.4:.0f}" height="13" rx="3" '
+                f'<rect x="-1" y="{-rh * 0.7:.1f}" width="{rw:.0f}" height="{rh:.1f}" rx="3" '
                 f'fill="#fbfaf6" fill-opacity="0.88"/>'
-                f'<text x="3" y="1.5" font-size="10.5" font-weight="700" fill="{colour}">{_esc(canon)}</text>'
+                f'<text x="3" y="{rh * 0.3 - 1:.1f}" font-size="{GRAPH_ROAD_FONT}" font-weight="700" fill="{colour}">{_esc(canon)}</text>'
                 f'</g>'
             )
 
@@ -2379,13 +2634,19 @@ def render_graph(junctions, seg_by_pair, points_by_edge, node_x, node_lane, edge
                 if pt["category"] == "tankstation":
                     if not fuel_side_visible(pt, ju if not reversed_dir else jv, jv if not reversed_dir else ju):
                         continue
-                    placer.add_box((px_pt - 4, py_pt - 4, px_pt + 4, py_pt + 4))
+                    placer.add_box((px_pt - GRAPH_FUEL_HALF, py_pt - GRAPH_FUEL_HALF,
+                                    px_pt + GRAPH_FUEL_HALF, py_pt + GRAPH_FUEL_HALF))
+                    pending_points.append((px_pt, py_pt, line_angle, pt))
+                elif pt["category"] == "poi":
+                    placer.add_box((px_pt - GRAPH_POI_R, py_pt - GRAPH_POI_R,
+                                    px_pt + GRAPH_POI_R, py_pt + GRAPH_POI_R))
                     pending_points.append((px_pt, py_pt, line_angle, pt))
                 elif pt["category"] in GRAPH_BRIDGE_CATEGORIES:
-                    placer.add_box((px_pt - 3.2, py_pt - 3.2, px_pt + 3.2, py_pt + 3.2))
+                    placer.add_box((px_pt - GRAPH_BRIDGE_R, py_pt - GRAPH_BRIDGE_R,
+                                    px_pt + GRAPH_BRIDGE_R, py_pt + GRAPH_BRIDGE_R))
                     pending_points.append((px_pt, py_pt, line_angle, pt))
 
-    # --- junction circles + labels ---
+    # --- junction circles ---
     for n in node_x:
         j = junctions[n]
         r = TIER_RADIUS.get(j["tier"], 6.0)
@@ -2395,31 +2656,65 @@ def render_graph(junctions, seg_by_pair, points_by_edge, node_x, node_lane, edge
         stroke = "#1B3A6B"
         dash = ' stroke-dasharray="3,2"' if j["jtype"] == "BorderCrossing" else ""
         placer.add_box((cx - r, cy - r, cx + r, cy + r))
-        # the label is rotated -28 degrees around the dot, starting 7px to its right
-        placer.add_rotated_box(cx, cy, -28, 7, -0.3 * 11 - 11 * 0.9, text_width(j["name"], 11), 11 * 1.15)
         svg_nodes.append(
             f'<circle class="junction" cx="{cx:.1f}" cy="{cy:.1f}" r="{r}" '
             f'fill="{fill}" stroke="{stroke}" stroke-width="2"{dash}>'
             f'<title>{j["name"]} ({j["id"]})</title></circle>'
         )
-        weight = "700" if is_endpoint else "600" if node_lane[n] == 0 else "500"
-        # label to the right of the dot, angled, so it stays legible whichever side a branch is on
+
+    # --- junction names: endpoints and the main route first, each on the
+    # first free spot of: angled up-right (the classic look), horizontal
+    # right, angled down-left, horizontal left ---
+    f = GRAPH_JUNCTION_FONT
+    for n in sorted(node_x, key=lambda n: (n not in (source, target), node_lane[n] != 0, node_x[n])):
+        j = junctions[n]
+        r = TIER_RADIUS.get(j["tier"], 6.0)
+        cx, cy = px(n), py(n)
+        weight = "700" if n in (source, target) else "600" if node_lane[n] == 0 else "500"
+        w = text_width(j["name"], f) * 1.08          # a little wider: bold
+        gap = max(9, r + 4)
+        options = [  # (angle, text-anchor, dx, dy in em, box x0, box y0) in the rotated frame
+            (-28, "start", gap, -0.3, gap, -1.2 * f),
+            (0, "start", r + 4, 0.35, r + 4, -0.55 * f),
+            (-28, "end", -gap, 0.9, -gap - w, 0.0),
+            (0, "end", -(r + 4), 0.35, -(r + 4) - w, -0.55 * f),
+        ]
+        chosen = None
+        for avoid_lines in (True, False):
+            for opt in options:
+                boxes = placer.rotated_boxes(cx, cy, opt[0], opt[4], opt[5], w, f * 1.15)
+                if placer.boxes_free(boxes, avoid_lines):
+                    chosen = (opt, boxes)
+                    break
+            if chosen:
+                break
+        if chosen is None:
+            opt = options[0]
+            chosen = (opt, placer.rotated_boxes(cx, cy, opt[0], opt[4], opt[5], w, f * 1.15))
+        (angle, anchor, dx, dy, _bx, _by), boxes = chosen
+        for b in boxes:
+            placer.add_box(b, text=True)
+        rot = f' transform="rotate({angle} {cx:.1f} {cy:.1f})"' if angle else ""
         svg_labels.append(
-            f'<text class="junction-label" x="{cx:.1f}" y="{cy:.1f}" dx="7" dy="-.3em" '
-            f'transform="rotate(-28 {cx:.1f} {cy:.1f})" font-weight="{weight}">{_esc(j["name"])}</text>'
+            f'<text class="junction-label" x="{cx:.1f}" y="{cy:.1f}" dx="{dx:.1f}" dy="{dy}em" '
+            f'text-anchor="{anchor}"{rot} font-weight="{weight}">{_esc(j["name"])}</text>'
         )
 
     # label texts and sizes
     items = []
     for x, y, line_angle, pt in pending_points:
-        if pt["category"] == "tankstation":
+        if pt["category"] == "poi":
+            text = pt["name"]
+            reach = GRAPH_POI_R + 0.5
+        elif pt["category"] == "tankstation":
             text = (pt["name"] or "") + (f' [{pt["brand"]}]' if pt.get("brand") else "")
-            reach = 4.5
+            reach = GRAPH_FUEL_HALF + 0.5
         else:
             text = (pt["name"] or "") + (f" ({pt['length_m']}m)" if pt.get("length_m") else "")
-            reach = 3.7
+            reach = GRAPH_BRIDGE_R + 0.5
+        bold = 1.08 if pt["category"] == "poi" else 1.0
         items.append(dict(x=x, y=y, line_angle=line_angle, pt=pt, reach=reach,
-                          w=text_width(text, GRAPH_POINT_FONT), h=GRAPH_POINT_FONT * LINE_HEIGHT,
+                          w=text_width(text, GRAPH_POINT_FONT) * bold, h=GRAPH_POINT_FONT * LINE_HEIGHT,
                           ignore=(x - reach, y - reach, x + reach, y + reach)))
 
     # vertical diagram: ordered columns beside each line - on the left first
@@ -2444,7 +2739,9 @@ def render_graph(junctions, seg_by_pair, points_by_edge, node_x, node_lane, edge
                                  clear=it["reach"], ignore=it["ignore"])
     for i, it in enumerate(items):
         box, leader = placed[i]
-        if it["pt"]["category"] == "tankstation":
+        if it["pt"]["category"] == "poi":
+            svg_pois.append(_poi_marker(it["x"], it["y"], it["pt"], box, leader))
+        elif it["pt"]["category"] == "tankstation":
             svg_points.append(_fuel_marker(it["x"], it["y"], it["pt"], box, leader))
         else:
             svg_points.append(_bridge_marker(it["x"], it["y"], it["pt"], box, leader))
@@ -2478,7 +2775,7 @@ def render_graph(junctions, seg_by_pair, points_by_edge, node_x, node_lane, edge
         f'viewBox="0 0 {width:.0f} {height:.0f}" xmlns="http://www.w3.org/2000/svg">'
         f'<rect width="100%" height="100%" fill="#fbfaf6"/>'
         + "".join(svg_lines) + "".join(svg_road_labels) + "".join(svg_points)
-        + "".join(svg_nodes) + "".join(svg_labels) + "".join(svg_dists)
+        + "".join(svg_nodes) + "".join(svg_labels) + "".join(svg_dists) + "".join(svg_pois)
         + "</svg>"
     )
     return svg, width, height, placer.stats
@@ -2510,8 +2807,20 @@ def _fuel_marker(x, y, pt, box, leader):
     return (
         f'<g class="fuel-marker" transform="translate({x:.1f} {y:.1f})">'
         + _leader(x, y, box, leader) +
-        f'<rect x="-4" y="-4" width="8" height="8" fill="#E8871E" stroke="#7a4400" stroke-width="1"/>'
+        f'<rect x="{-GRAPH_FUEL_HALF}" y="{-GRAPH_FUEL_HALF}" width="{2 * GRAPH_FUEL_HALF}" '
+        f'height="{2 * GRAPH_FUEL_HALF}" fill="#E8871E" stroke="#7a4400" stroke-width="1"/>'
         f'<text class="fuel-label zoom-label" x="{lx:.1f}" y="{ly:.1f}" text-anchor="{anchor}">{label}{brand}</text>'
+        f'</g>'
+    )
+
+
+def _poi_marker(x, y, pt, box, leader):
+    lx, ly, anchor = _label_pos(x, y, box)
+    return (
+        f'<g class="poi-marker" transform="translate({x:.1f} {y:.1f})">'
+        f'<title>{poi_title(pt["poi"])}</title>'
+        + _leader(x, y, box, leader) + star_svg(0, 0, GRAPH_POI_R, "poi-star") +
+        f'<text class="poi-label" x="{lx:.1f}" y="{ly:.1f}" text-anchor="{anchor}">{_esc(pt["name"])}</text>'
         f'</g>'
     )
 
@@ -2524,7 +2833,7 @@ def _bridge_marker(x, y, pt, box, leader):
     return (
         f'<g class="bridge-marker" transform="translate({x:.1f} {y:.1f})">'
         + _leader(x, y, box, leader) +
-        f'<circle r="3.2" fill="{colour}" stroke="#222" stroke-width="0.8"/>'
+        f'<circle r="{GRAPH_BRIDGE_R}" fill="{colour}" stroke="#222" stroke-width="0.8"/>'
         f'<text class="bridge-label bridges-on" x="{lx:.1f}" y="{ly:.1f}" text-anchor="{anchor}">{_esc(pt["name"])}</text>'
         f'<text class="bridge-label bridges-full" x="{lx:.1f}" y="{ly:.1f}" text-anchor="{anchor}">{_esc(pt["name"])}{length_txt}</text>'
         f'</g>'
@@ -2541,9 +2850,9 @@ HTML_TEMPLATE = """<!DOCTYPE html>
   #wrap {{ position:absolute; inset:0; overflow:hidden; cursor:grab; }}
   #wrap.dragging {{ cursor:grabbing; }}
   #stage {{ position:absolute; left:0; top:0; transform-origin: 0 0; }}
-  .junction-label {{ font-size:11px; fill:#1a1a1a; }}
+  .junction-label {{ font-size:{junction_font}px; fill:#1a1a1a; }}
   .fuel-label, .bridge-label {{ font-size:{point_font}px; fill:#333; display:none;
-                                 paint-order:stroke; stroke:#fbfaf6; stroke-width:2px; stroke-linejoin:round; }}
+                                 paint-order:stroke; stroke:#fbfaf6; stroke-width:2.8px; stroke-linejoin:round; }}
   .leader {{ stroke:#888; stroke-width:0.6; }}
   #stage.points-visible .fuel-label {{ display:block; }}
   #stage.bridges-on .bridge-label.bridges-on {{ display:block; }}
@@ -2553,10 +2862,14 @@ HTML_TEMPLATE = """<!DOCTYPE html>
   #stage.points-visible .fuel-marker {{ display:block; }}
   #stage.bridges-on .bridge-marker, #stage.bridges-full .bridge-marker {{ display:block; }}
   .brand {{ fill:#a35b00; font-style:italic; }}
+  .poi-marker {{ display:none; }}
+  #stage.pois-on .poi-marker {{ display:block; }}
+  .poi-label {{ font-size:{point_font}px; font-weight:700; fill:{poi_text};
+                paint-order:stroke; stroke:#fbfaf6; stroke-width:2.8px; stroke-linejoin:round; }}
   .dist-label {{ display:none; }}
   #stage.distances-on .dist-label {{ display:block; }}
   .dist-label text {{ font-size:{dist_font}px; font-weight:700; fill:#185FA5;
-                      paint-order:stroke; stroke:#fbfaf6; stroke-width:2px; stroke-linejoin:round; }}
+                      paint-order:stroke; stroke:#fbfaf6; stroke-width:2.8px; stroke-linejoin:round; }}
   #controls {{ position:absolute; top:12px; right:12px; z-index:5; display:flex; flex-direction:column; gap:6px; }}
   #controls button {{ font-size:13px; padding:6px 10px; border-radius:6px; border:1px solid #999; background:#fff; cursor:pointer; }}
   #controls button.active {{ background:#1B3A6B; color:#fff; border-color:#1B3A6B; }}
@@ -2575,9 +2888,10 @@ HTML_TEMPLATE = """<!DOCTYPE html>
   <button id="toggleFuel" class="active">Tankstations</button>
   <button id="toggleBridges">Bruggen/tunnels</button>
   <button id="toggleDist" class="active">Afstanden</button>
+  <button id="togglePoi" class="active">&#9733; Bezienswaardigheden</button>
 </div>
 <div id="info">hoofdroute ca. {shortest_km:.0f} km &middot; {route_count} route-varianten getoond (marge {margin_pct:.0f}% per traject)</div>
-<div id="wrap"><div id="stage" class="points-visible distances-on">{svg}</div></div>
+<div id="wrap"><div id="stage" class="points-visible distances-on pois-on">{svg}</div></div>
 <script>
 (function() {{
   const stage = document.getElementById('stage');
@@ -2640,6 +2954,11 @@ HTML_TEMPLATE = """<!DOCTYPE html>
     stage.classList.toggle('points-visible');
     fuelBtn.classList.toggle('active');
   }};
+  const poiBtn = document.getElementById('togglePoi');
+  poiBtn.onclick = () => {{
+    stage.classList.toggle('pois-on');
+    poiBtn.classList.toggle('active');
+  }};
   const distBtn = document.getElementById('toggleDist');
   distBtn.onclick = () => {{
     stage.classList.toggle('distances-on');
@@ -2669,7 +2988,10 @@ def build_graph_page(xlsx_path=DEFAULT_XLSX, start_name=DEFAULT_FROM,
                      end_name=DEFAULT_TO, margin=DEFAULT_MARGIN, title=None,
                      branches_per_leg=4, min_novel_km=MIN_NOVEL_KM, via=None, orientation="vertical",
                      explicit_branches=None):
-    """Builds the route-diagram page. Returns (html, stats)."""
+    """Builds the route-diagram page. Returns (html, stats). explicit_branches:
+    lists of junction names; None means DEFAULT_BRANCHES."""
+    if explicit_branches is None:
+        explicit_branches = DEFAULT_BRANCHES
     junctions, segments, seg_by_pair, points_by_edge = load_data(xlsx_path)
     source = find_junction_by_name(junctions, start_name)
     target = find_junction_by_name(junctions, end_name)
@@ -2681,19 +3003,24 @@ def build_graph_page(xlsx_path=DEFAULT_XLSX, start_name=DEFAULT_FROM,
 
     accepted = [(main_route, main_length)]
     leg_count = 0
-    for a, b in zip(waypoint_ids, waypoint_ids[1:]):
-        leg_alts = find_leg_alternates(G, a, b, margin, branches_per_leg, min_novel_km)
-        accepted.extend(leg_alts)
-        leg_count += len(leg_alts)
-
-    # explicit, user-specified branches (named waypoint chains) — for real alternatives
-    # (e.g. a well-known detour via a different city) that a pure k-shortest-path search
-    # either misses or buries beneath undesirable backtracking detours
+    # explicit, user-specified branches (named waypoint chains) first — real
+    # alternatives (e.g. a well-known corridor via a different city) that should
+    # always be drawn; their road then counts as drawn, so the automatic search
+    # below doesn't add a near-copy of them
+    drawn = {frozenset(e) for e in zip(main_route, main_route[1:])}
     for chain_names in (explicit_branches or []):
         chain_ids = [find_junction_by_name(junctions, n) for n in chain_names]
         branch_path, branch_length = build_main_route(G, chain_ids)
         accepted.append((branch_path, branch_length))
+        drawn.update(frozenset(e) for e in zip(branch_path, branch_path[1:]))
         leg_count += 1
+
+    for a, b in zip(waypoint_ids, waypoint_ids[1:]):
+        leg_alts = find_leg_alternates(G, a, b, margin, branches_per_leg, min_novel_km, drawn_edges=drawn)
+        accepted.extend(leg_alts)
+        leg_count += len(leg_alts)
+        for path, _length in leg_alts:
+            drawn.update(frozenset(e) for e in zip(path, path[1:]))
 
     node_x, node_lane, edges_drawn = layout_routes(accepted)
     svg, width, height, label_stats = render_graph(
@@ -2705,7 +3032,9 @@ def build_graph_page(xlsx_path=DEFAULT_XLSX, start_name=DEFAULT_FROM,
     html = HTML_TEMPLATE.format(
         title=_esc(title), svg=svg,
         route_count=leg_count + 1, shortest_km=main_length, margin_pct=margin * 100,
-        point_font=GRAPH_POINT_FONT, dist_font=GRAPH_DIST_FONT, max_zoom=GRAPH_MAX_ZOOM,
+        point_font=GRAPH_POINT_FONT, dist_font=GRAPH_DIST_FONT, junction_font=GRAPH_JUNCTION_FONT,
+        poi_text=POI_TEXT,
+        max_zoom=GRAPH_MAX_ZOOM,
     )
     return html, dict(
         title=title, main_route_km=round(main_length, 1), branches=leg_count,
@@ -2793,10 +3122,12 @@ def main():
                     help="komma-gescheiden lijst van junction-namen die de hoofdroute verplicht moet passeren, "
                          "in volgorde (bijv. 'Venlo,Koblenz,Hockenheim,Karlsruhe,Ulm/Elchingen,Grenztunnel Fussen')")
     rg.add_argument('--orientation', choices=['vertical', 'horizontal'], default='vertical')
-    rg.add_argument('--branch', action='append', default=[],
+    rg.add_argument('--branch', action='append', default=None,
                     help="komma-gescheiden waypoint-keten voor een expliciete extra tak, bijv. "
-                         "'Hockenheim,Weinsberg,Wurzburg-West,Feuchtwangen/Crailsheim,Ulm/Elchingen'. "
-                         "Mag meerdere keren opgegeven worden.")
+                         "'Hockenheim,Weinsberg,Würzburg-West,Feuchtwangen/Crailsheim,Ulm/Elchingen'. "
+                         "Mag meerdere keren opgegeven worden; vervangt DEFAULT_BRANCHES.")
+    rg.add_argument('--no-default-branches', action='store_true',
+                    help='teken de vaste takken uit DEFAULT_BRANCHES niet')
     rg.add_argument('--route-title', default=None)
     args = ap.parse_args()
 
@@ -2809,7 +3140,12 @@ def main():
                                     tube_style_hierarchies=tube_style)
 
     via = [v.strip() for v in args.via.split(',')] if args.via else []
-    explicit_branches = [[n.strip() for n in b.split(',')] for b in args.branch]
+    if args.branch is not None:
+        explicit_branches = [[n.strip() for n in b.split(',')] for b in args.branch]
+    elif args.no_default_branches:
+        explicit_branches = []
+    else:
+        explicit_branches = None   # DEFAULT_BRANCHES
     graph_html, graph_stats = build_graph_page(
         args.xlsx, args.start_name, args.end_name, args.margin, args.route_title,
         args.branches_per_leg, args.min_novel_km, via, args.orientation, explicit_branches)

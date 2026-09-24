@@ -68,13 +68,15 @@ Builds one HTML page with two tabs:
 
 - **Kaart:** the whole network as a schematic map that stays close to real
   geography. It has zoom, a GPS button, and toggles for bridge names (B),
-  distances (Km) and debug IDs (D).
+  distances (Km), points of interest (★) and debug IDs (D).
 - **Route:** the route between two places as a "metro board" diagram, like the
   line diagrams on NS departure boards. The main route runs straight, and
   alternative branches fan out and rejoin it. Positions are ordinal hops, not
   geography. Buttons toggle fuel stations, bridges and tunnels (off, on, or on
-  with length), and segment distances (`Afstanden`, on by default). The
-  distances come from `Distance (km)`.
+  with length), segment distances (`Afstanden`, on by default) and points of
+  interest (`★ Bezienswaardigheden`, on by default). The distances come from
+  `Distance (km)`. Lines never cross: after the layout, each detour's lane is
+  re-chosen to remove crossings.
 
 ```bash
 python3 mapmaking.py
@@ -95,12 +97,38 @@ route tab directly.
 | **Route tab** | | |
 | `--from` / `--to` | `Vught` / `Berwang` | Start and end junction names |
 | `--via` | none | Comma-separated junctions the main route must pass, in order |
-| `--branch` | none | Comma-separated waypoint chain for an explicit extra branch (can be repeated) |
+| `--branch` | `DEFAULT_BRANCHES` | Comma-separated waypoint chain for a fixed branch (can be repeated). Replaces `DEFAULT_BRANCHES` |
+| `--no-default-branches` | off | Don't draw the fixed branches from `DEFAULT_BRANCHES` |
 | `--margin` | `0.5` | Maximum detour for alternative branches, relative to the shortest route (0.5 = 50%) |
-| `--branches-per-leg` | `4` | Maximum alternative branches between two waypoints |
+| `--branches-per-leg` | `4` | Maximum automatic branches between two waypoints (on top of the fixed ones) |
 | `--min-novel-km` | `3.0` | Minimum km of new road a branch must add |
 | `--orientation` | `vertical` | `vertical` or `horizontal` |
 | `--route-title` | `Route: <from> → <to>` | Route tab title |
+
+### Which branches the route diagram shows
+
+1. **Main route:** the shortest route from `--from` to `--to` (through `--via`,
+   if given).
+2. **Fixed branches:** `DEFAULT_BRANCHES` at the top of `mapmaking.py`,
+   currently the A3/A7 corridor Kerpen → Köln-West → Frankfurter Kreuz →
+   Biebelried → Feuchtwangen/Crailsheim → Ulm/Elchingen. These are always drawn.
+   Add a line there for other routes you always want to see.
+3. **Automatic branches:** up to `--branches-per-leg`. The script collects up to
+   400 candidate routes within `--margin`. One at a time, the candidate adding the
+   **most road that isn't drawn yet** wins, so each branch shows a genuinely
+   different corridor rather than a local variant a few kilometres longer.
+   Roads of the fixed branches already count as drawn. A branch must be **one
+   detour**: it leaves the drawn routes once and rejoins once, so it never
+   stacks unrelated detours. At most `MAX_LOCAL_SHARE` (25%) of that detour may
+   be `Local` road, which keeps out routes over a B-road such as the B17.
+
+### Points of interest
+
+The `Points of Interest` sheet is shown in both tabs as a gold ★ with the name
+in bold, and has its own toggle. Each point is drawn on the segment named in its
+`Segment` column, at the spot where its lat/lon projects onto that segment.
+Hovering over a star shows its category and notes. Points whose segment doesn't
+exist in the Segments tab are skipped.
 
 ### How the map layout works
 
@@ -136,7 +164,8 @@ and the maximum zoom is high enough for the text to be fully readable.
   so it has more of these crossings.
 
 Tuning constants are at the top of the script: `POINT_FONT`, `POINT_SUB_FONT`,
-`MAP_MAX_ZOOM`, `GRAPH_POINT_FONT`, `GRAPH_DIST_FONT`, `GRAPH_MAX_ZOOM`, `LABEL_PRIORITY`,
+`MAP_MAX_ZOOM`, `MAP_POI_FONT`, `MAP_POI_R`, `GRAPH_POINT_FONT`, `GRAPH_DIST_FONT`,
+`GRAPH_JUNCTION_FONT`, `GRAPH_ROAD_FONT`, `GRAPH_POI_R`, `LANE_HEIGHT`, `STEP_X`, `GRAPH_MAX_ZOOM`, `LABEL_PRIORITY`,
 `UNIT_PER_DEGREE`, `CANVAS_SCALE`, `TIER_STYLE`, `ROAD_WIDTH`, `PALETTE` and
 `PINNED_COLOURS`.
 
