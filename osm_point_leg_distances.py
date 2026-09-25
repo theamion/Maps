@@ -39,9 +39,12 @@ So for every point this script:
     it NEEDS_REVIEW (with every measured number attached) instead of
     quietly writing a wrong one.
 
-It only ADDS columns to a COPY of the workbook - PositionOnEdge and every
-other existing column are left untouched. You decide what to do with the
-results.
+It only ADDS "OSM ..." columns to the Points tab - PositionOnEdge and every
+other existing column are left untouched. By default it reads and writes
+junctions_topology_v5.xlsx next to this script (in place); re-running
+refills those columns instead of adding a second set. mapmaking.py uses
+'OSM DistanceFromStart (km)' for the distances between fuel stations in
+the route diagram.
 
 RATE LIMITING / RESUMABILITY
 -----------------------------
@@ -51,20 +54,18 @@ Same spirit as osm_verify_junctions.py / osm_segment_distances.py:
     (heavier) Overpass road-snap call, one per point
   - a JSON cache written after every point, so Ctrl+C / a dropped
     connection just means re-running the script to pick up where it
-    left off - already-cached points and edges are never re-queried
+    left off - already-cached points and edges are not re-queried, except
+    those that ended in ERROR or SEGMENT_UNREACHABLE (retried)
 
 Usage:
     pip3 install requests
-    python3 osm_point_leg_distances.py --xlsx junctions_topology_v5_cleaned.xlsx \
-        --output junctions_topology_v5_pointlegs.xlsx --cache osm_point_leg_cache.json
+    python3 osm_point_leg_distances.py
 
-    # only fuel stations (the default), small test run first:
-    python3 osm_point_leg_distances.py --xlsx junctions_topology_v5_cleaned.xlsx \
-        --output test.xlsx --cache test_cache.json --limit 5
+    # only fuel stations (the default), small test run into a copy first:
+    python3 osm_point_leg_distances.py --output test.xlsx --cache test_cache.json --limit 5
 
     # every point type instead of just tankstations:
-    python3 osm_point_leg_distances.py --xlsx junctions_topology_v5_cleaned.xlsx \
-        --output all_points.xlsx --cache osm_point_leg_cache_all.json --category ""
+    python3 osm_point_leg_distances.py --cache osm_point_leg_cache_all.json --category ""
 """
 import argparse
 import json
@@ -76,6 +77,11 @@ from collections import defaultdict
 
 import requests
 from openpyxl import load_workbook
+
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+DEFAULT_XLSX = os.path.join(SCRIPT_DIR, "junctions_topology_v5.xlsx")
+DEFAULT_CACHE = os.path.join(SCRIPT_DIR, "osm_point_leg_cache.json")
+RETRY_STATUSES = ("ERROR", "SEGMENT_UNREACHABLE")
 
 OVERPASS_MIRRORS = [
     "https://overpass-api.de/api/interpreter",
@@ -411,9 +417,10 @@ def process_edge(edge_id, seg, pts, junctions, session, radii_m, osrm_delay, tol
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--xlsx", required=True)
-    ap.add_argument("--output", required=True)
-    ap.add_argument("--cache", default="osm_point_leg_cache.json")
+    ap.add_argument("--xlsx", default=DEFAULT_XLSX)
+    ap.add_argument("--output", default=None,
+                    help="workbook to write the OSM columns to (default: the --xlsx workbook itself)")
+    ap.add_argument("--cache", default=DEFAULT_CACHE)
     ap.add_argument("--category", default="tankstation",
                     help="only process Points whose Category matches this (case-insensitive); "
                          "pass --category \"\" to process every point type")
@@ -428,6 +435,8 @@ def main():
                          "before it's treated as a problem rather than a normal service-area detour")
     ap.add_argument("--limit", type=int, default=None, help="only process the first N edges (for testing)")
     args = ap.parse_args()
+    if args.output is None:
+        args.output = args.xlsx
 
     radii_m = [int(float(r) * 1000) for r in args.radii_km.split(",")]
 
@@ -478,14 +487,16 @@ def main():
         edge_ids = edge_ids[: args.limit]
 
     all_point_ids = {p["id"] for eid in edge_ids for p in points_by_edge[eid]}
-    todo_edges = [eid for eid in edge_ids if any(p["id"] not in cache for p in points_by_edge[eid])]
+    def needs_work(pid):
+        return pid not in cache or cache[pid].get("status") in RETRY_STATUSES
+    todo_edges = [eid for eid in edge_ids if any(needs_work(p["id"]) for p in points_by_edge[eid])]
     print(f"{len(edge_ids)} segmenten met {len(all_point_ids)} punten (categorie: "
           f"{args.category or 'alle'}), {len(todo_edges)} segmenten nog (deels) te verwerken.")
 
     session = requests.Session()
     for idx_e, eid in enumerate(todo_edges, 1):
         pts = points_by_edge[eid]
-        pending = [p for p in pts if p["id"] not in cache]
+        pending = [p for p in pts if needs_work(p["id"])]
         if not pending:
             continue
         seg = segments[eid]
@@ -515,9 +526,16 @@ def main():
                "OSM leg status", "OSM leg detail", "OSM snap status", "OSM snap lat", "OSM snap lon",
                "OSM snap afstand tot origineel (km)", "OSM segment cap (km)", "OSM som benen (km)",
                "OSM som t.o.v. cap (%)"]
-    start_col = ws_out.max_column + 1
-    for i, h in enumerate(headers):
-        ws_out.cell(row=1, column=start_col + i, value=h)
+    # reuse the columns from an earlier run, so re-running doesn't add a second set
+    existing = {c.value: c.column for c in ws_out[1] if c.value}
+    next_col = ws_out.max_column + 1
+    cols = []
+    for h in headers:
+        if h not in existing:
+            ws_out.cell(row=1, column=next_col, value=h)
+            existing[h] = next_col
+            next_col += 1
+        cols.append(existing[h])
 
     out_header = [c.value for c in ws_out[1]]
     pid_col = out_header.index("Point ID")
@@ -533,8 +551,8 @@ def main():
             snap.get("status"), snap.get("snap_lat"), snap.get("snap_lon"), snap.get("snap_dist_km"),
             r.get("cap_km"), r.get("sum_km"), r.get("over_pct"),
         ]
-        for i, v in enumerate(vals):
-            ws_out.cell(row=row[pid_col].row, column=start_col + i, value=v)
+        for col, v in zip(cols, vals):
+            ws_out.cell(row=row[pid_col].row, column=col, value=v)
 
     wb_out.save(args.output)
 

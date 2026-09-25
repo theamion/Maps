@@ -2659,7 +2659,13 @@ def render_graph(junctions, seg_by_pair, points_by_edge, node_x, node_lane, edge
                     pending_points.append((px_pt, py_pt, line_angle, pt))
             # legs junction -> fuel station -> ... -> junction, in travel order
             if fuel_stops:
-                stops = [(0.0, 0.0)] + sorted(fuel_stops) + [(1.0, seg["distance_km"])]
+                # measured km can disagree slightly with Distance (km): keep every
+                # stop inside the segment and in km order, so no stretch is negative
+                seg_km = seg["distance_km"]
+                fuel_stops = sorted((f, min(max(k, 0.0), seg_km)) for f, k in fuel_stops)
+                kms = sorted(k for _f, k in fuel_stops)
+                fuel_stops = [(f, k) for (f, _k), k in zip(fuel_stops, kms)]
+                stops = [(0.0, 0.0)] + fuel_stops + [(1.0, seg_km)]
                 for (fa, ka), (fb, kb) in zip(stops, stops[1:]):
                     fm = (fa + fb) / 2
                     pending_fuel_legs.append((x1 + fm * (x2 - x1), y1 + fm * (y2 - y1), x1, y1, x2, y2, kb - ka))

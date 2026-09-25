@@ -17,6 +17,7 @@ in the script's own folder, whichever directory you run it from.
 | `mapmaking.py` | Map and route diagram in one HTML page with two tabs → `holidays.html` |
 | `osm_verify_junctions.py` | Checks junction coordinates against Holidays.xlsx and OpenStreetMap |
 | `osm_segment_distances.py` | Checks segment distances against OSRM driving distances |
+| `osm_point_leg_distances.py` | Measures each fuel station's distance along its segment with OSRM → `OSM DistanceFromStart (km)` in the Points tab (used by the route diagram) |
 | `apply_osm_coords.py`, `apply_osm_distances.py` | Copy reviewed OSM results into `Latitude`/`Longitude` and `Distance (km)` |
 | `osm_junction_cache.json`, `osm_segment_cache.json` | Caches for the OSM checks, so runs can resume |
 | `generate_map_v2.deprecatedpy`, `generate_graph.deprecatedpy` | Superseded by `mapmaking.py`. Kept for reference only |
