@@ -65,12 +65,13 @@ Excel before running them.
 
 ## mapmaking.py: map and route diagram
 
-Builds one HTML page with two tabs:
+Builds one HTML page with a map tab and one tab per route in `ROUTE_TABS`:
 
 - **Kaart:** the whole network as a schematic map that stays close to real
   geography. It has zoom, a GPS button, and toggles for bridge names (B),
   distances (Km), points of interest (★) and debug IDs (D).
-- **Route:** the route between two places as a "metro board" diagram, like the
+- **Route tabs:** currently Vught → Berwang, and Vught → Serfaus via Lindau.
+  Each shows the route between two places as a "metro board" diagram, like the
   line diagrams on NS departure boards. The main route runs straight, and
   alternative branches fan out and rejoin it. Positions are ordinal hops, not
   geography. Buttons toggle fuel stations, bridges and tunnels (off, on, or on
@@ -90,7 +91,21 @@ python3 mapmaking.py --from Vught --to Berwang --via "Venlo,Koblenz"
 ```
 
 Open `holidays.html` in a browser. Adding `#route` to the address opens the
-route tab directly.
+first route tab directly, `#route2` the second, and so on.
+
+The route tabs are defined in `ROUTE_TABS` at the top of `mapmaking.py`. Each
+entry has a destination (`to`), optionally junctions the main route must pass
+in order (`via`), and optionally its own fixed branches (`branches`, default
+`DEFAULT_BRANCHES`). The Serfaus tab adds the route via Füssen and the Fernpass
+as a fixed branch. It's the shortest way to Serfaus, but because it never
+passes Lindau, the automatic search would never find it. Add a line to
+`ROUTE_TABS` for another destination.
+
+Passing `--to`, `--via`, `--branch` or `--route-title` replaces `ROUTE_TABS`
+with a single tab for just that route. The other route options (`--from`,
+`--margin`, `--branches-per-leg`, `--min-novel-km`, `--orientation`,
+`--no-default-branches`) apply to every route tab. Building takes about 25
+seconds per route tab.
 
 | Option | Default | Description |
 |--------|---------|-------------|
@@ -101,7 +116,7 @@ route tab directly.
 | `--no-tube-primary` | off | Disable London-Underground-style angle snapping for Primary roads |
 | `--no-tube-secondary` | off | Disable angle snapping for Secondary roads |
 | **Route tab** | | |
-| `--from` / `--to` | `Vught` / `Berwang` | Start and end junction names |
+| `--from` / `--to` | `Vught` / `ROUTE_TABS` | Start and end junction names |
 | `--via` | none | Comma-separated junctions the main route must pass, in order |
 | `--branch` | `DEFAULT_BRANCHES` | Comma-separated waypoint chain for a fixed branch (can be repeated). Replaces `DEFAULT_BRANCHES` |
 | `--no-default-branches` | off | Don't draw the fixed branches from `DEFAULT_BRANCHES` |

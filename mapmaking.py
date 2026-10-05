@@ -2060,6 +2060,16 @@ DEFAULT_BRANCHES = [
     ["Kerpen", "Köln-West", "Frankfurter Kreuz", "Biebelried", "Feuchtwangen/Crailsheim", "Ulm/Elchingen"],  # A3/A7
     ["Weinsberg", "Leonberg"],  # A81
 ]
+# one tab per route in holidays.html, after the map. to: destination; via: junctions the
+# main route must pass, in order; branches: fixed branches (default DEFAULT_BRANCHES).
+# Junction names may be partial ("Lindau" finds "Lindau-Hörbranz").
+ROUTE_TABS = [
+    dict(to="Berwang"),
+    dict(to="Serfaus", via=["Lindau"],
+         # the shortest way to Serfaus is via Füssen and the Fernpass, which never
+         # passes Lindau - so it would never show up as an automatic branch
+         branches=DEFAULT_BRANCHES + [["Memmingen", "Grenztunnel Füssen", "Fernpass", "Zams-Landeck Ost"]]),
+]
 
 HIERARCHY_WIDTH = {"Primary": 5.0, "Secondary": 4.0, "Connector": 3.0, "Local": 2.2}
 TIER_RADIUS = {"Small": 5.0, "Medium": 8.0, "Large": 12.0}
@@ -3075,7 +3085,10 @@ def build_graph_page(xlsx_path=DEFAULT_XLSX, start_name=DEFAULT_FROM,
         orientation=orientation,
     )
 
-    title = title or f"Route: {junctions[source]['name']} → {junctions[target]['name']}"
+    if not title:
+        title = f"Route: {junctions[source]['name']} → {junctions[target]['name']}"
+        if via_ids:
+            title += " via " + ", ".join(junctions[v]['name'] for v in via_ids)
     html = HTML_TEMPLATE.format(
         title=_esc(title), svg=svg,
         route_count=leg_count + 1, shortest_km=main_length, margin_pct=margin * 100,
@@ -3094,12 +3107,22 @@ def build_graph_page(xlsx_path=DEFAULT_XLSX, start_name=DEFAULT_FROM,
 # Part 3: one page, two tabs
 # =====================================================================
 
-def combine_pages(map_html, graph_html, map_tab, graph_tab, page_title):
-    """Both views as separate documents in one file: each sits in its own
-    iframe (srcdoc), so their ids, styles and scripts can't collide. Both
-    frames keep their full size (hidden with visibility, not display), so
-    each view's initial fit and zoom state survive switching tabs."""
+def combine_pages(map_html, routes, map_tab, page_title):
+    """The map and every route diagram as separate documents in one file:
+    each sits in its own iframe (srcdoc), so their ids, styles and scripts
+    can't collide. All frames keep their full size (hidden with visibility,
+    not display), so each view's initial fit and zoom state survive
+    switching tabs. routes: list of (tab title, page html); their tabs are
+    #route, #route2, #route3, ..."""
     esc = lambda s: html_lib.escape(s, quote=True)
+    views = [("map", map_tab, map_html, ' allow="geolocation"')]
+    views += [("route" if i == 0 else f"route{i + 1}", title, page, "") for i, (title, page) in enumerate(routes)]
+    tab_buttons = "\n".join(
+        f'  <button role="tab" id="tab-{vid}" data-view="view-{vid}" aria-selected="{str(i == 0).lower()}">'
+        f'{esc(title)}</button>' for i, (vid, title, _p, _a) in enumerate(views))
+    frames = "\n".join(
+        f'<iframe id="view-{vid}" class="view{" active" if i == 0 else ""}" title="{esc(title)}"{attr} '
+        f'srcdoc="{esc(page)}"></iframe>' for i, (vid, title, page, attr) in enumerate(views))
     return f'''<!DOCTYPE html>
 <html lang="nl"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
@@ -3118,11 +3141,9 @@ def combine_pages(map_html, graph_html, map_tab, graph_tab, page_title):
 </style>
 </head><body>
 <div id="tabs" role="tablist">
-  <button role="tab" id="tab-map" data-view="view-map" aria-selected="true">{esc(map_tab)}</button>
-  <button role="tab" id="tab-route" data-view="view-route" aria-selected="false">{esc(graph_tab)}</button>
+{tab_buttons}
 </div>
-<iframe id="view-map" class="view active" title="{esc(map_tab)}" allow="geolocation" srcdoc="{esc(map_html)}"></iframe>
-<iframe id="view-route" class="view" title="{esc(graph_tab)}" srcdoc="{esc(graph_html)}"></iframe>
+{frames}
 <script>
 (function() {{
   const tabs = Array.from(document.querySelectorAll('#tabs button'));
@@ -3137,7 +3158,8 @@ def combine_pages(map_html, graph_html, map_tab, graph_tab, page_title):
     try {{ frame.contentWindow.focus(); }} catch (e) {{}}
   }}
   tabs.forEach(t => t.addEventListener('click', () => show(t.dataset.view)));
-  if (location.hash === '#route') show('view-route');
+  const fromHash = document.getElementById('view-' + location.hash.slice(1));
+  if (location.hash.length > 1 && fromHash) show(fromHash.id);
 }})();
 </script>
 </body></html>
@@ -3156,9 +3178,11 @@ def main():
     mg.add_argument('--no-tube-secondary', action='store_true',
                     help='disable London-Underground-style angle snapping for Secondary roads (on by default)')
 
-    rg = ap.add_argument_group('route tab')
+    rg = ap.add_argument_group('route tabs',
+                               'without --to/--via/--branch/--route-title every route in ROUTE_TABS gets a tab; '
+                               'with any of them, one tab with just that route')
     rg.add_argument('--from', dest='start_name', default=DEFAULT_FROM)
-    rg.add_argument('--to', dest='end_name', default=DEFAULT_TO)
+    rg.add_argument('--to', dest='end_name', default=None, help=f'destination (default {DEFAULT_TO})')
     rg.add_argument('--margin', type=float, default=DEFAULT_MARGIN,
                     help='max. relatieve omrijding voor alternatieve takken t.o.v. de kortste route PER TRAJECT (0.5 = 50%%)')
     rg.add_argument('--branches-per-leg', type=int, default=4,
@@ -3186,23 +3210,28 @@ def main():
     map_html, map_stats = build_map(xlsx_path=args.xlsx, title=args.map_title,
                                     tube_style_hierarchies=tube_style)
 
-    via = [v.strip() for v in args.via.split(',')] if args.via else []
-    if args.branch is not None:
-        explicit_branches = [[n.strip() for n in b.split(',')] for b in args.branch]
-    elif args.no_default_branches:
-        explicit_branches = []
+    if args.end_name or args.via or args.branch is not None or args.route_title:
+        tabs = [dict(to=args.end_name or DEFAULT_TO,
+                     via=[v.strip() for v in args.via.split(',')] if args.via else [],
+                     branches=[[n.strip() for n in b.split(',')] for b in args.branch]
+                     if args.branch is not None else None,
+                     title=args.route_title)]
     else:
-        explicit_branches = None   # DEFAULT_BRANCHES
-    graph_html, graph_stats = build_graph_page(
-        args.xlsx, args.start_name, args.end_name, args.margin, args.route_title,
-        args.branches_per_leg, args.min_novel_km, via, args.orientation, explicit_branches)
+        tabs = ROUTE_TABS
+    routes, route_stats = [], []
+    for tab in tabs:
+        branches = [] if args.no_default_branches else tab.get('branches')
+        graph_html, graph_stats = build_graph_page(
+            args.xlsx, args.start_name, tab['to'], args.margin, tab.get('title'),
+            args.branches_per_leg, args.min_novel_km, tab.get('via') or [], args.orientation, branches)
+        routes.append((graph_stats['title'], graph_html))
+        route_stats.append(graph_stats)
 
-    page = combine_pages(map_html, graph_html, map_tab='Kaart', graph_tab=graph_stats['title'],
-                         page_title=args.map_title)
+    page = combine_pages(map_html, routes, map_tab='Kaart', page_title=args.map_title)
     with open(args.output, 'w', encoding='utf-8') as f:
         f.write(page)
 
-    print(json.dumps({'output': args.output, 'map': map_stats, 'route': graph_stats},
+    print(json.dumps({'output': args.output, 'map': map_stats, 'routes': route_stats},
                      indent=2, default=str, ensure_ascii=False))
 
 
