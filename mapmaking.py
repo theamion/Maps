@@ -57,6 +57,8 @@ BADGE_ZOOM_THRESHOLD = 4.5  # map: scale at which brand badges appear (names alr
 MARKER_TIER_ZOOM = [0.35, 0.7, 1.3, 2.2]
 MAP_POI_FONT = 5.5        # map: point-of-interest name size
 MAP_POI_R = 6.0           # map: point-of-interest star radius
+MAP_ROAD_FONT = 10        # map: road-number label size (e.g. "A3")
+MAP_ROAD_LABEL_CLEARANCE = 320.0  # map: min SVG-unit gap between two labels of the SAME road
 MAP_MAX_ZOOM = 16         # map: max zoom - POINT_FONT * 16 = 72px text
 GRAPH_POINT_FONT = 10     # route diagram: point label size, in SVG units
 GRAPH_DIST_FONT = 10      # route diagram: segment distance label size
@@ -505,12 +507,28 @@ TIER_STYLE = {
 ROAD_WIDTH = {'Primary': 4.5, 'Secondary': 3.4, 'Connector': 2.5, 'Local': 2.0}
 
 PALETTE = [
+    # The first 33 are hand-picked originals; the rest are generated (see
+    # scripts/ - varied hue at several lightness/saturation bands) and
+    # filtered to stay visually distinct from each other and from the
+    # reserved marker colours (fuel red, POI gold, river blue, navy).
+    # ~80+ roads need this many to keep two unrelated roads from sharing
+    # a colour anywhere they're not already forced apart by the conflict
+    # check in assign_road_colours().
     "#7F77DD", "#1D9E75", "#D85A30", "#D4537E", "#639922", "#BA7517",
     "#993C1D", "#0F6E56", "#993556", "#3B6D11", "#854F0B", "#26215C",
     "#04342C", "#4A1B0C", "#72243E", "#27500A", "#633806", "#5F5E5A",
     "#712B13", "#4B1528", "#173404", "#412402", "#7A4E9E", "#1E6B6B",
-    "#B5442E", "#8A6D3B", "#3E7C4A", "#9B2D5C", "#7C5A2E",
-    "#8C3E3E", "#5E7C3E", "#6B3E8C", "#3E8C7C",
+    "#B5442E", "#8A6D3B", "#3E7C4A", "#9B2D5C", "#7C5A2E", "#8C3E3E",
+    "#5E7C3E", "#6B3E8C", "#3E8C7C", "#A1982A", "#3DA12A", "#2AA14F",
+    "#2AA1A1", "#2A6AA1", "#2A33A1", "#582AA1", "#8E2AA1", "#7E7A1A",
+    "#1A7E26", "#441A7E", "#721A7E", "#BB554D", "#BB884D", "#BBBB4D",
+    "#88BB4D", "#55BB4D", "#4DBB77", "#4DBBAA", "#4D99BB", "#4D66BB",
+    "#664DBB", "#994DBB", "#BB4DAA", "#CE786D", "#CEA56D", "#CACE6D",
+    "#9ECE6D", "#71CE6D", "#6DCE96", "#6D96CE", "#9E6DCE", "#CA6DCE",
+    "#CE6DA5", "#525619", "#195635", "#481956", "#C7B423", "#8EC723",
+    "#68C723", "#42C723", "#23C74F", "#23C775", "#23C79B", "#23C7C1",
+    "#2381C7", "#235CC7", "#2336C7", "#5C23C7", "#8123C7", "#A723C7",
+    "#C7239B", "#C72375", "#C7234F",
 ]
 NAVY_BLUE = "#1B3A6B"
 PINNED_COLOURS = {"A2": NAVY_BLUE, "A61": NAVY_BLUE, "A7": NAVY_BLUE}
@@ -1003,6 +1021,44 @@ def road_key(road):
 
 def is_local_road(road):
     return road_key(road) == 'LOKALE_WEG'
+
+
+def assign_road_labels(segments, polylines, X, Y, clearance=MAP_ROAD_LABEL_CLEARANCE):
+    """Which segment of each (non-local) road gets its number drawn on the
+    line - like the "A3"/"A1" labels on the reference map - and where.
+
+    A road with many short consecutive segments shouldn't repeat its
+    number on every one of them, but a road that's broken up into widely
+    separated stretches should still be labelled on each: grouped per
+    road, each segment's polyline midpoint is a label candidate (the
+    longest segments preferred when several are close together), and
+    assign_declutter_tiers() with a single clearance keeps only the ones
+    that are more than `clearance` SVG units from another kept candidate
+    of the SAME road - unrelated roads don't compete for this at all.
+
+    Returns {edge_id: (label_text, x, y, angle_deg)} for the chosen
+    segments only."""
+    groups = defaultdict(list)
+    for seg in segments:
+        if is_local_road(seg['road']):
+            continue
+        poly = polylines.get(seg['edge_id'])
+        if poly and len(poly) >= 2:
+            groups[road_key(seg['road'])].append(seg)
+
+    chosen = {}
+    for canon, segs in groups.items():
+        candidates = []
+        for seg in segs:
+            poly = polylines[seg['edge_id']]
+            (mx, my), ang = point_at_fraction_on_polyline(poly, 0.5)
+            candidates.append((seg['edge_id'], X(mx), Y(my), ang, seg.get('dist_km') or 0))
+        candidates.sort(key=lambda c: -c[4])  # longer segments get first pick of a spot
+        tiers = assign_declutter_tiers([(c[1], c[2]) for c in candidates], clearances=[clearance])
+        for (eid, sx, sy, ang, _km), tier in zip(candidates, tiers):
+            if tier == 0:
+                chosen[eid] = (canon, sx, sy, ang)
+    return chosen
 
 
 def assign_road_colours(segments, palette):
@@ -1534,6 +1590,48 @@ def region_blobs_svg(regions, junctions, pos, X, Y):
     return "".join(fills), "".join(labels)
 
 
+LEGEND_ROW_H = 26
+LEGEND_ICON_CX = 15
+
+
+def legend_row_svg(y, icon_svg, label):
+    return (f'<g transform="translate(0 {y})">'
+            f'<g transform="translate({LEGEND_ICON_CX} {LEGEND_ROW_H/2:.1f})">{icon_svg}</g>'
+            f'<text x="32" y="{LEGEND_ROW_H/2 + 4:.1f}" font-size="12" fill="#2C2C2A">{html_lib.escape(label)}</text>'
+            f'</g>')
+
+
+def build_legend_html():
+    """The Kaart tab's symbol legend (bottom-left, its own small fixed SVG -
+    not part of the zoomable #stage, so it's unaffected by the map's own
+    zoom and always just as legible). Deliberately doesn't list individual
+    road colours/numbers (there are dozens) - 'Weg' is one generic sample
+    instead, explaining the line itself, not a colour key."""
+    items = [
+        (junction_circle_svg(0, 0, 'Junction', 'Large'), 'Grote aansluiting'),
+        (junction_circle_svg(0, 0, 'Junction', 'Small'), 'Kleine aansluiting'),
+        (fuel_marker_svg(0, 0, 90, 2, MARKER_COLOUR['tankstation'], length=7, base=7), 'Tankstation'),
+        (bar_svg(0, 0, 90, MARKER_COLOUR['brug (dal)'], length_m=500, bar_len=15), 'Brug'),
+        (bar_svg(0, 0, 90, MARKER_COLOUR['tunnel'], length_m=500, bar_len=15), 'Tunnel'),
+        (star_svg(0, 0, 7, 'poi-star'), 'Bezienswaardigheid'),
+        (bar_svg(0, 0, 90, MARKER_COLOUR['brug (rivier)'], length_m=500, bar_len=15), 'Rivierbrug'),
+        (f'<path d="M -9 6 Q 0 -6 9 6" stroke="#7FB8E0" stroke-width="3" fill="none" stroke-linecap="round"/>', 'Rivier'),
+        (junction_circle_svg(0, 0, 'BorderCrossing', 'Medium', ('#999999', '#CCCCCC')), 'Grensovergang'),
+        (f'<line x1="-9" y1="0" x2="9" y2="0" stroke="{PALETTE[4]}" stroke-width="4" stroke-linecap="round"/>',
+         'Weg (kleur per wegnummer)'),
+        (f'<rect x="-9" y="-6" width="18" height="13" rx="6" fill="{REGION_BLOB_FILL}"/>'
+         + map_icons.mountain_icon_svg(0, -1, size=5, colour=REGION_LABEL_COLOUR), 'Natuurgebied'),
+    ]
+    h = LEGEND_ROW_H * len(items) + 16
+    rows = "".join(legend_row_svg(8 + i * LEGEND_ROW_H, icon, label) for i, (icon, label) in enumerate(items))
+    return f'''<div id="legendPanel">
+  <svg width="210" height="{h}" viewBox="0 0 210 {h}" xmlns="http://www.w3.org/2000/svg" font-family="Arial, sans-serif">
+    <rect x="0.5" y="0.5" width="209" height="{h-1}" rx="6" fill="#FFFFFF" fill-opacity="0.92" stroke="#B5B5AE"/>
+    {rows}
+  </svg>
+</div>'''
+
+
 def render_map(junctions, segments, pos, roads, points, border_data, border_node_pos,
                 river_data=None, ambiguous_crossings=None, tube_style_hierarchies=None, pois=None,
                 regions=None):
@@ -1558,6 +1656,7 @@ def render_map(junctions, segments, pos, roads, points, border_data, border_node
     road_colours = assign_road_colours(segments, PALETTE)
     polylines = build_road_polylines(junctions, segments, pos, roads, tube_style_hierarchies=tube_style_hierarchies)
     polylines = resolve_road_crossings(segments, polylines, roads)
+    road_labels = assign_road_labels(segments, polylines, X, Y)
 
     parts = [f'<svg width="{width:.0f}" height="{height:.0f}" viewBox="0 0 {width:.0f} {height:.0f}" '
              f'xmlns="http://www.w3.org/2000/svg" font-family="Arial, sans-serif">',
@@ -1679,8 +1778,26 @@ def render_map(junctions, segments, pos, roads, points, border_data, border_node
     for poly in river_sampled_polys:
         placer.add_polyline([(X(x), Y(y)) for x, y in poly])
 
-    # point-of-interest stars first, so junction names are placed around them
+    # road-number labels ("A3", ...): fixed positions (assign_road_labels
+    # already chose where), so they're claimed as obstacles for everything
+    # else up front, same as the road network itself
     occupied_label_boxes = []
+    road_label_svg = []
+    for eid, (canon, sx, sy, ang) in road_labels.items():
+        angle = ang + 180 if ang > 90 or ang < -90 else ang
+        rw, rh = 6 + len(canon) * MAP_ROAD_FONT * 0.62, MAP_ROAD_FONT * 1.25
+        placer.add_rotated_box(sx, sy, angle, -rw / 2, -rh * 0.7, rw, rh)
+        occupied_label_boxes.append((sx - rw / 2, sy - rh, sx + rw / 2, sy + rh))
+        colour = road_colours.get(canon, '#888')
+        road_label_svg.append(
+            f'<g transform="translate({sx:.1f} {sy:.1f}) rotate({angle:.1f})">'
+            f'<text x="0" y="{rh * 0.3 - 1:.1f}" text-anchor="middle" font-size="{MAP_ROAD_FONT}" '
+            f'font-weight="700" fill="{colour}" stroke="#FAFAF7" stroke-width="{MAP_ROAD_FONT * 0.32:.2f}" '
+            f'stroke-linejoin="round" paint-order="stroke">{html_lib.escape(canon)}</text>'
+            f'</g>'
+        )
+
+    # point-of-interest stars first, so junction names are placed around them
     poi_positions = []
     for poi in pois or []:
         poly = polylines.get(poi['edge_id'])
@@ -1922,6 +2039,9 @@ def render_map(junctions, segments, pos, roads, points, border_data, border_node
                 parts.append(f'<text class="debug-label" x="{midx:.1f}" y="{midy:.1f}" '
                              f'font-size="7" fill="#1A6B3C" font-weight="bold">{seg["edge_id"]}</text>')
 
+    # road-number labels, on top of the road lines themselves
+    parts.extend(road_label_svg)
+
     # 9-11. junctions/exits, then border crossings, then tripoints (on top)
     # labels placed in tier order (Large first) so the most important names
     # get first pick of a clear spot; a leader line is drawn whenever a
@@ -2061,6 +2181,7 @@ def build_map(xlsx_path=DEFAULT_XLSX, title="Geographic Spine Map", tube_style_h
         regions=regions,
     )
     segments_geo_json = json.dumps(segments_geo)
+    legend_html = build_legend_html()
 
     html = f'''<!DOCTYPE html>
 <html><head><meta charset="utf-8"><title>{title}</title>
@@ -2070,6 +2191,8 @@ def build_map(xlsx_path=DEFAULT_XLSX, title="Geographic Spine Map", tube_style_h
   #wrap.grabbing {{ cursor:grabbing; }}
   #stage {{ transform-origin: 0 0; }}
   #controls {{ position:fixed; top:12px; right:12px; z-index:10; display:flex; flex-direction:column; gap:6px; }}
+  #legendPanel {{ position:fixed; left:12px; bottom:12px; z-index:10; display:none; pointer-events:none; }}
+  #legendPanel.visible {{ display:block; }}
   #controls button {{ width:36px; height:36px; font-size:20px; border:1px solid #999; background:white;
                        border-radius:6px; cursor:pointer; box-shadow:0 1px 3px rgba(0,0,0,0.2); }}
   #controls button:active {{ background:#eee; }}
@@ -2117,7 +2240,9 @@ def build_map(xlsx_path=DEFAULT_XLSX, title="Geographic Spine Map", tube_style_h
   <button id="distToggle" title="Afstanden aan/uit">Km</button>
   <button id="poiToggle" class="active" title="Bezienswaardigheden aan/uit">&#9733;</button>
   <button id="gpsToggle" title="Mijn locatie volgen">&#128205;</button>
+  <button id="legendToggle" title="Legenda aan/uit">L</button>
 </div>
+{legend_html}
 <div id="wrap"><div id="stage" class="pois-on">{svg}</div></div>
 <script>
 (function() {{
@@ -2296,6 +2421,11 @@ def build_map(xlsx_path=DEFAULT_XLSX, title="Geographic Spine Map", tube_style_h
     marker.setAttribute('cy', sy);
     marker.style.display = 'block';
   }}
+
+  document.getElementById('legendToggle').onclick = function() {{
+    document.getElementById('legendPanel').classList.toggle('visible');
+    this.classList.toggle('active');
+  }};
 
   document.getElementById('gpsToggle').onclick = function() {{
     if (watchId !== null) {{

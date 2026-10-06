@@ -228,6 +228,32 @@ Add rows to NaturalRegions for another region - the junction names must exist
 in the Junctions tab, and more of them (especially ones that outline the
 area) give a better-fitting blob.
 
+### Road-number labels (Kaart only)
+
+Every non-local road gets its number ("A3", not the internal "A3 (DE)" used
+to tell same-numbered roads in different countries apart - see
+`Canonical Road ID` in the Roads tab) drawn on the line itself, coloured to
+match it, aligned with the line's direction, at the middle of a segment. A
+road broken into many short consecutive segments doesn't repeat the label on
+each one: `assign_road_labels()` groups segments by road and keeps only
+those whose candidate label is more than `MAP_ROAD_LABEL_CLEARANCE` SVG units
+from another kept label of the *same* road, so a long continuous stretch
+gets one label every so often instead of one per segment, while a short
+stretch far from the rest still gets its own.
+
+### Legend (Kaart only)
+
+The "L" button toggles a fixed symbol legend in the bottom-left corner -
+built once in `build_legend_html()` from the exact same drawing functions
+the map itself uses (`junction_circle_svg`, `fuel_marker_svg`, `bar_svg`,
+`star_svg`, ...), so it can't drift out of sync with what's actually drawn.
+It explains symbol *shapes* (large/small junction, tankstation, brug, tunnel,
+point of interest, rivierbrug, rivier, grensovergang, a generic weg, a
+natuurgebied swatch) rather than the dozens of individual road colours. It's
+its own small fixed-position SVG, not part of the zoomable `#stage`, so it
+stays a constant, legible size and never blocks map panning/zooming
+(`pointer-events:none`) regardless of the map's own zoom level.
+
 ### How the map layout works
 
 1. **Projection:** junction lat/lon are projected to normalised map units
@@ -284,7 +310,9 @@ Tuning constants are at the top of the script: `POINT_FONT`, `POINT_SUB_FONT`,
 `PINNED_COLOURS`. For region blobs: `REGION_BLOB_FILL`, `REGION_BLOB_PAD` and
 `REGION_LABEL_FONT`/`REGION_LABEL_COLOUR`. For brand badges: `BADGE_ZOOM_THRESHOLD`
 in `mapmaking.py`, and `ICON_SIZE`, `FUEL_BRAND_COLOURS`, `FOOD_BRAND_COLOURS`,
-`FUEL_ICON_FILES`, `FOOD_ICON_FILES` in `map_icons.py`.
+`FUEL_ICON_FILES`, `FOOD_ICON_FILES` in `map_icons.py`. For marker declutter:
+`MARKER_TIER_CLEARANCES`/`MARKER_TIER_ZOOM`. For road labels: `MAP_ROAD_FONT`,
+`MAP_ROAD_LABEL_CLEARANCE`.
 
 ## OpenStreetMap checks
 
