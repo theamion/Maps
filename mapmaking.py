@@ -593,6 +593,8 @@ def load_all(xlsx_path):
             'order': row[idx.get('OrderOnRoad')] or 0,
             'dist_km': row[idx.get('Distance (km)')],
             'hierarchy_override': row[idx.get('Hierarchy Override')] if 'Hierarchy Override' in idx else None,
+            'exit_from': parse_compass_direction(row[idx['Exit direction (From)']]) if 'Exit direction (From)' in idx else None,
+            'exit_to': parse_compass_direction(row[idx['Exit direction (To)']]) if 'Exit direction (To)' in idx else None,
         })
 
     return wb, junctions, roads, segments
@@ -840,6 +842,29 @@ TUBE_ANGLES_STRICT = [0, 45, 90, 135, 180, 225, 270, 315]
 # with --tube-relaxed instead
 TUBE_ANGLES_RELAXED = [0, 30, 45, 60, 90, 120, 135, 150, 180, 210, 225, 240, 270, 300, 315, 330]
 
+# compass direction -> octilinear angle, in this file's (x=east, y=south)
+# coordinate system. Accepts short codes and both Dutch and English words, so
+# the Segments sheet's optional "Exit direction (From/To)" columns can be
+# filled in either language.
+COMPASS_ANGLES = {
+    'e': 0, 'o': 0, 'oost': 0, 'east': 0,
+    'se': 45, 'zo': 45, 'zuidoost': 45, 'southeast': 45,
+    's': 90, 'z': 90, 'zuid': 90, 'south': 90,
+    'sw': 135, 'zw': 135, 'zuidwest': 135, 'southwest': 135,
+    'w': 180, 'west': 180,
+    'nw': 225, 'noordwest': 225, 'northwest': 225,
+    'n': 270, 'noord': 270, 'north': 270,
+    'ne': 315, 'no': 315, 'noordoost': 315, 'northeast': 315,
+}
+
+
+def parse_compass_direction(value):
+    """Parse an optional Segments-sheet 'Exit direction' cell (e.g. 'N',
+    'west', 'Noordoost') into an octilinear angle, or None if blank/unknown."""
+    if not value:
+        return None
+    return COMPASS_ANGLES.get(str(value).strip().lower())
+
 
 def build_road_polylines(junctions, segments, pos, roads, tube_style_hierarchies=None, angles_deg=None):
     """Straight line between each segment's two (already spine-adjusted)
@@ -859,11 +884,50 @@ def build_road_polylines(junctions, segments, pos, roads, tube_style_hierarchies
     angle_units = {a: (math.cos(math.radians(a)), math.sin(math.radians(a))) for a in sorted(set(angles_deg))}
     angle_list = sorted(angle_units)
 
-    def octilinear(p1, p2):
+    def octilinear(p1, p2, forced_a1=None, forced_a2=None):
+        """forced_a1/forced_a2, when given, pin the elbow's near-p1/near-p2
+        leg to a specific allowed angle instead of letting it fall out of
+        p1->p2's raw bearing - used for the Segments sheet's optional
+        'Exit direction' hint, for junctions where the geographically
+        natural bend reads wrong (e.g. two roads schematically snapping to
+        the same side of a junction)."""
         x1, y1 = p1; x2, y2 = p2
         dx, dy = x2 - x1, y2 - y1
         if math.hypot(dx, dy) < 1e-6:
             return [p1, p2]
+
+        def solve(a1, a2):
+            v1, v2 = angle_units[a1], angle_units[a2]
+            det = v1[0]*v2[1] - v2[0]*v1[1]
+            if abs(det) < 1e-9:
+                return None
+            a = (dx*v2[1] - dy*v2[0]) / det
+            b = (v1[0]*dy - v1[1]*dx) / det
+            if a < -1e-6 or b < -1e-6:
+                return None
+            a, b = max(a, 0), max(b, 0)
+            mx, my = x1 + a*v1[0], y1 + a*v1[1]
+            if math.hypot(mx-x1, my-y1) < 1e-6 or math.hypot(x2-mx, y2-my) < 1e-6:
+                return None
+            return [p1, (mx, my), p2], a + b
+
+        if forced_a1 is not None or forced_a2 is not None:
+            candidates = []
+            if forced_a1 is not None and forced_a2 is not None:
+                r = solve(forced_a1, forced_a2)
+                if r:
+                    candidates.append(r)
+            if not candidates and forced_a1 is not None:
+                candidates = [r for a2 in angle_list if (r := solve(forced_a1, a2))]
+            if not candidates and forced_a2 is not None:
+                candidates = [r for a1 in angle_list if (r := solve(a1, forced_a2))]
+            if candidates:
+                # shortest total elbow length reads as the most natural bend
+                # among those honouring the forced direction(s)
+                return min(candidates, key=lambda c: c[1])[0]
+            # forced angle(s) can't form a valid elbow here - fall through
+            # to the ordinary bearing-bracket choice below
+
         bearing = math.degrees(math.atan2(dy, dx)) % 360
         n = len(angle_list)
         a1 = a2 = None
@@ -874,17 +938,8 @@ def build_road_polylines(junctions, segments, pos, roads, tube_style_hierarchies
             if -1e-6 <= rel <= span + 1e-6:
                 a1, a2 = c1, c2
                 break
-        v1, v2 = angle_units[a1], angle_units[a2]
-        det = v1[0]*v2[1] - v2[0]*v1[1]
-        if abs(det) < 1e-9:
-            return [p1, p2]
-        a = (dx*v2[1] - dy*v2[0]) / det
-        b = (v1[0]*dy - v1[1]*dx) / det
-        a, b = max(a, 0), max(b, 0)
-        mx, my = x1 + a*v1[0], y1 + a*v1[1]
-        if math.hypot(mx-x1, my-y1) < 1e-6 or math.hypot(x2-mx, y2-my) < 1e-6:
-            return [p1, p2]
-        return [p1, (mx, my), p2]
+        r = solve(a1, a2)
+        return r[0] if r else [p1, p2]
 
     polylines = {}
     for seg in segments:
@@ -893,7 +948,10 @@ def build_road_polylines(junctions, segments, pos, roads, tube_style_hierarchies
             continue
         hier = segment_hierarchy(seg, roads)
         if hier in tube_style_hierarchies:
-            polylines[seg['edge_id']] = octilinear(tuple(a), tuple(b))
+            forced_a1 = seg.get('exit_from')
+            exit_to = seg.get('exit_to')
+            forced_a2 = (exit_to + 180) % 360 if exit_to is not None else None
+            polylines[seg['edge_id']] = octilinear(tuple(a), tuple(b), forced_a1, forced_a2)
         else:
             polylines[seg['edge_id']] = [tuple(a), tuple(b)]
     return polylines

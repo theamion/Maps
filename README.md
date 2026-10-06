@@ -236,14 +236,19 @@ area) give a better-fitting blob.
 
 Every non-local road gets its number ("A3", not the internal "A3 (DE)" used
 to tell same-numbered roads in different countries apart - see
-`Canonical Road ID` in the Roads tab) drawn on the line itself, coloured to
-match it, aligned with the line's direction, at the middle of a segment. A
-road broken into many short consecutive segments doesn't repeat the label on
-each one: `assign_road_labels()` groups segments by road and keeps only
-those whose candidate label is more than `MAP_ROAD_LABEL_CLEARANCE` SVG units
-from another kept label of the *same* road, so a long continuous stretch
-gets one label every so often instead of one per segment, while a short
-stretch far from the rest still gets its own.
+`Canonical Road ID` in the Roads tab) drawn on the line itself, aligned with
+the line's direction, at the middle of a segment. A road broken into many
+short consecutive segments doesn't repeat the label on each one:
+`assign_road_labels()` groups segments by road and keeps only those whose
+candidate label is more than `MAP_ROAD_LABEL_CLEARANCE` SVG units from
+another kept label of the *same* road, so a long continuous stretch gets one
+label every so often instead of one per segment, while a short stretch far
+from the rest still gets its own. The label sits on a pill tinted lightly
+with the road's own colour (`fill-opacity="0.22"`), but the text itself is
+drawn in `complementary_colour()` of that colour (hue rotated 180 degrees) -
+so the label always reads clearly against its pill regardless of how dark or
+light the road's colour is, instead of risking text that blends into the
+line it's labelling.
 
 ### Legend (Kaart only)
 
@@ -269,6 +274,35 @@ stays a constant, legible size and never blocks map panning/zooming
 4. **Rendering:** the script draws roads, borders, rivers, junction markers,
    bridges and tunnels, fuel-station badges, and labels as SVG. A2, A61 and A7
    are pinned to navy blue.
+
+With strict tube-style angle snapping (the default - see `--tube-relaxed`
+below), two or more roads can end up snapped onto the exact same one of the
+8 allowed angles right where they leave a junction, since there are only 8
+to choose from. `debundle_junction_overlaps()` detects this (grouping
+segment-ends by `(junction, angle)`) and nudges every line but the middle
+one sideways for a short stretch near the junction, tapering back to the
+real route just beyond it, so they fan out visibly instead of overlapping.
+
+### Exit direction (Segments sheet, optional)
+
+The angle a tube-style road leaves a junction at is normally picked purely
+from the bearing to the next junction - which sometimes reads wrong even
+after debundling, e.g. two genuinely different roads both legitimately
+bending to leave a busy junction "northward" when one of them should
+schematically read as going east. The Segments sheet has two optional
+columns, `Exit direction (From)` and `Exit direction (To)`, to pin the
+schematic compass direction a specific segment leaves its `From`/`To`
+junction - a compass letter or word (`N`, `NE`, `oost`, `noordwest`, ...;
+see `COMPASS_ANGLES` for every accepted spelling, Dutch and English). Only
+tube-style segments use it; it's ignored for Connector/Local roads, which
+are always drawn as direct lines. Leave both blank (the common case) and
+the angle is picked automatically as before.
+
+Example: at Ekkersweijer (A2/A50), A50 used to snap north in parallel with
+A2 instead of reading as its own line. Setting `Exit direction (From)` = `E`
+on the Ekkersweijer->Paalgraven (A50) segment, and `W`/`N` on the two A2
+segments, makes the three roads fan out from Ekkersweijer the way they're
+meant to be read, independent of their raw geographic bearing.
 
 ### Labels for bridges, tunnels and fuel stations
 
@@ -435,7 +469,7 @@ python3 osm_segment_distances.py --apply
 |-------|----------|---------|
 | `Junctions` | ID, name, roads meeting here, country, lat/lon, layout region, `Geography lock`, `Max move`, tier, type | all scripts |
 | `Roads` | Road ID, number, hierarchy (Primary/Secondary/Connector/Local), layout parameters | mapmaking |
-| `Segments` | Road edges between junctions: `Edge ID`, `From ID`, `To ID`, `Road`, `Distance (km)` | mapmaking, segment check |
+| `Segments` | Road edges between junctions: `Edge ID`, `From ID`, `To ID`, `Road`, `Distance (km)`, optional `Exit direction (From)`/`Exit direction (To)` | mapmaking, segment check |
 | `Points` | Bridges, tunnels, fuel stations and rest areas placed along a segment (`Edge ID`, `PositionOnEdge`), incl. `Fuel brand`, `Food brand(s)` and `Side direction` | mapmaking, serways_brands |
 | `River Junctions`, `River Segments` | River network | mapmaking (Kaart) |
 | `Border Nodes`, `Border Segments` | Country borders | mapmaking (Kaart) |
