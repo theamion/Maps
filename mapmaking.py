@@ -52,6 +52,9 @@ DEFAULT_OUTPUT = os.path.join(SCRIPT_DIR, 'holidays.html')
 POINT_FONT = 4.5          # map: point name size, in SVG units
 POINT_SUB_FONT = 3.8      # map: second line (bridge length / fuel brand)
 BADGE_ZOOM_THRESHOLD = 4.5  # map: scale at which brand badges appear (names already show from 2.5x)
+# map: scale at which each declutter tier of bridge/tunnel/fuel MARKERS
+# appears (tier 0 shows even at the minimum zoom); see assign_declutter_tiers()
+MARKER_TIER_ZOOM = [0.35, 0.7, 1.3, 2.2]
 MAP_POI_FONT = 5.5        # map: point-of-interest name size
 MAP_POI_R = 6.0           # map: point-of-interest star radius
 MAP_MAX_ZOOM = 16         # map: max zoom - POINT_FONT * 16 = 72px text
@@ -401,6 +404,44 @@ def star_svg(cx, cy, r, cls):
 def poi_title(poi):
     parts = [poi['name']] + [str(v) for v in (poi.get('category'), poi.get('notes')) if v]
     return html_lib.escape(' - '.join(parts), quote=False)
+
+
+MARKER_TIER_CLEARANCES = [700.0, 300.0, 130.0, 55.0]  # SVG units, coarsest to finest
+
+
+def assign_declutter_tiers(positions, clearances=MARKER_TIER_CLEARANCES):
+    """Greedy multi-pass spatial thinning for 'show everything, but not
+    all at once when zoomed out' (Kaart tab bridge/tunnel/fuel markers).
+
+    Tier 0 is the sparsest set: only markers mutually more than
+    `clearances[0]` apart. Tier 1 adds whatever's at least `clearances[1]`
+    from anything already kept (tier 0 or 1), and so on; whatever's still
+    left after the last clearance - the densest clusters, e.g. 5 bridges a
+    few hundred metres apart - gets one tier past the end, shown only once
+    zoomed in enough that nothing is that crowded any more. A marker's
+    tier is thus the zoom stage it first appears at, and it stays visible
+    at every stage after that.
+
+    `positions`: list of (x, y) in the SAME priority order the caller
+    wants ties broken in - earlier entries win a spot in a crowded tier.
+    Returns a same-length/order list of tiers (0 .. len(clearances))."""
+    tier = [None] * len(positions)
+    kept = []  # (x, y) already placed, in this or an earlier tier
+    remaining = list(range(len(positions)))
+    for level, clearance in enumerate(clearances):
+        still_remaining = []
+        clearance2 = clearance * clearance
+        for i in remaining:
+            x, y = positions[i]
+            if all((x - kx)**2 + (y - ky)**2 >= clearance2 for kx, ky in kept):
+                tier[i] = level
+                kept.append((x, y))
+            else:
+                still_remaining.append(i)
+        remaining = still_remaining
+    for i in remaining:
+        tier[i] = len(clearances)
+    return tier
 
 
 def marker_extent(sx, sy, ang, cat, sides, side, length_m):
@@ -1033,6 +1074,7 @@ def load_points_v2(wb, junctions):
             'brand': row[idx.get('Fuel brand')] if 'Fuel brand' in idx else None,
             'facilities': row[idx.get('Facilities')] if 'Facilities' in idx else None,
             'food_brand': row[idx.get('Food brand(s)')] if 'Food brand(s)' in idx else None,
+            'side_direction': row[idx.get('Side direction')] if 'Side direction' in idx else None,
         })
     return points
 
@@ -1072,6 +1114,30 @@ def compass_side_sign(from_lat, from_lon, to_lat, to_lon, compass):
     dlat, dlon = COMPASS_PROBE_OFFSET[compass]
     mid_lat, mid_lon = (from_lat + to_lat) / 2, (from_lon + to_lon) / 2
     return real_side_sign(from_lat, from_lon, to_lat, to_lon, mid_lat + dlat, mid_lon + dlon)
+
+
+# A one-sided station's side is normally read straight off its own
+# Latitude/Longitude via real_side_sign(). That breaks down for a station
+# whose coordinate sits close to the straight line between its segment's
+# two junctions (which can be many km apart - e.g. the A8 Leonberg ->
+# Ulm/Elchingen segment is ~100km, and the real A8 doesn't run perfectly
+# straight over that distance) - real_side_sign then reads the wrong side
+# even though the coordinate itself is a fine approximation. Where the
+# Points tab's 'Side direction' column says which compass side the
+# station is officially on (north/south/east/west), that settles it
+# instead - no guessing from a possibly-misleading coordinate.
+def one_sided_marker_side(p, fj, tj):
+    """The +1/-1 schematic side for a one-sided tankstation/autohof point:
+    the 'Side direction' column when the point has one, else
+    real_side_sign() from its own Latitude/Longitude, else the default 1
+    when there isn't enough data to tell."""
+    if p.get('side_direction') and fj and tj \
+            and fj.get('lat') is not None and tj.get('lat') is not None:
+        return compass_side_sign(fj['lat'], fj['lon'], tj['lat'], tj['lon'], p['side_direction'])
+    if p.get('lat') is not None and p.get('lon') is not None and fj and tj \
+            and fj.get('lat') is not None and tj.get('lat') is not None:
+        return real_side_sign(fj['lat'], fj['lon'], tj['lat'], tj['lon'], p['lat'], p['lon'])
+    return 1
 
 
 def point_at_fraction_on_polyline(poly, frac):
@@ -1705,17 +1771,37 @@ def render_map(junctions, segments, pos, roads, points, border_data, border_node
                                             box=box, reach=reach, badges=entries,
                                             name_suffix=f" ({side_word.capitalize()})"))
                 continue
-            side = 1
-            if cat in ('tankstation', 'autohof') and p['sides'] == 1 and p.get('lat') is not None \
-                    and p.get('lon') is not None and fj and tj \
-                    and fj['lat'] is not None and tj['lat'] is not None:
-                side = real_side_sign(fj['lat'], fj['lon'], tj['lat'], tj['lon'], p['lat'], p['lon'])
+            side = one_sided_marker_side(p, fj, tj) if cat in ('tankstation', 'autohof') and p['sides'] == 1 else 1
             box, reach = marker_extent(sx, sy, ang, cat, p['sides'], side, p.get('length_m'))
             if box:
                 placer.add_box(box)
             point_marks.append(dict(p=p, sx=sx, sy=sy, ang=ang, cat=cat, side=side,
                                     box=box, reach=reach, badges=(info['entries'] if info else []),
                                     name_suffix=''))
+
+    # zoom-dependent declutter tiers for bridge/tunnel/fuel markers: which
+    # zoom stage each one first appears at, so zoomed out shows a sparse
+    # but still-lively sample instead of either everything (illegible
+    # clutter) or nothing (an empty-looking map). A sided fuel station's
+    # two markers share one id/position, so they're deduplicated first and
+    # always end up in the same tier (they appear/disappear together).
+    declutter_cats = BAR_CATEGORIES | {'tankstation', 'autohof'}
+    seen_ids = set()
+    declutter_candidates = []  # (point_id, sx, sy, priority_key)
+    for pm in point_marks:
+        pid = pm['p'].get('id')
+        if pm['cat'] not in declutter_cats or pid is None or pid in seen_ids:
+            continue
+        seen_ids.add(pid)
+        # bigger bridges/tunnels earn a spot at lower zoom than small ones;
+        # fuel stations have no such signal, so they're all equal priority
+        priority = -(pm['p'].get('length_m') or 0) if pm['cat'] in BAR_CATEGORIES else 0
+        declutter_candidates.append((pid, pm['sx'], pm['sy'], priority))
+    declutter_candidates.sort(key=lambda c: c[3])
+    marker_tier = dict(zip(
+        (c[0] for c in declutter_candidates),
+        assign_declutter_tiers([(c[1], c[2]) for c in declutter_candidates]),
+    ))
 
     # points of interest: a star on their segment's line (drawn on top of
     # the roads), labelled first so they get the closest spots
@@ -1791,22 +1877,24 @@ def render_map(junctions, segments, pos, roads, points, border_data, border_node
                 (px, py), ang = point_at_fraction_on_polyline(poly, p['pos_on_edge'])
                 sx, sy = X(px), Y(py)
                 cat = (p['category'] or '').lower()
+                tier = marker_tier.get(p['id'])
+                tier_class = f'marker-tier-{tier}' if tier is not None else None
                 if cat in BAR_CATEGORIES:
-                    parts.append(bar_svg(sx, sy, ang, MARKER_COLOUR.get(cat, '#999'), length_m=p.get('length_m')))
+                    marker = bar_svg(sx, sy, ang, MARKER_COLOUR.get(cat, '#999'), length_m=p.get('length_m'))
+                    parts.append(f'<g class="{tier_class}">{marker}</g>' if tier_class else marker)
                 elif cat in ('tankstation', 'autohof'):
                     info = point_badge_info.get(p['id'])
                     if info and info['mode'] == 'sided':
                         # a different brand per side: two one-sided markers,
                         # each on its real geographic side, instead of one
                         # diamond spanning both
-                        for sign, (_side_word, _entries) in info['sides'].items():
-                            parts.append(fuel_marker_svg(sx, sy, ang, 1, MARKER_COLOUR.get(cat, '#A83232'), side=sign))
+                        markers = ''.join(
+                            fuel_marker_svg(sx, sy, ang, 1, MARKER_COLOUR.get(cat, '#A83232'), side=sign)
+                            for sign in info['sides'])
                     else:
-                        side = 1
-                        if p['sides'] == 1 and p.get('lat') is not None and p.get('lon') is not None:
-                            if fj and tj and fj['lat'] is not None and tj['lat'] is not None:
-                                side = real_side_sign(fj['lat'], fj['lon'], tj['lat'], tj['lon'], p['lat'], p['lon'])
-                        parts.append(fuel_marker_svg(sx, sy, ang, p['sides'], MARKER_COLOUR.get(cat, '#A83232'), side=side))
+                        side = one_sided_marker_side(p, fj, tj) if p['sides'] == 1 else 1
+                        markers = fuel_marker_svg(sx, sy, ang, p['sides'], MARKER_COLOUR.get(cat, '#A83232'), side=side)
+                    parts.append(f'<g class="{tier_class}">{markers}</g>' if tier_class else markers)
                 # distance from this segment's From junction to this point,
                 # in real km (haversine on true lat/lon) - own colour/toggle,
                 # independent of the point-name labels above
@@ -1995,6 +2083,15 @@ def build_map(xlsx_path=DEFAULT_XLSX, title="Geographic Spine Map", tube_style_h
      past the point names above, toggled by 'badges-visible' on #stage */
   .brand-badge {{ display:none; }}
   #stage.badges-visible .brand-badge {{ display:block; }}
+  /* bridge/tunnel/fuel-station MARKERS (not their names/badges) are never
+     all-or-nothing: tier 0 shows even fully zoomed out, each later tier
+     only once zoomed in enough that tier isn't too crowded any more - see
+     assign_declutter_tiers() in mapmaking.py and MARKER_TIER_ZOOM below */
+  .marker-tier-1, .marker-tier-2, .marker-tier-3, .marker-tier-4 {{ display:none; }}
+  #stage.mt1 .marker-tier-1 {{ display:block; }}
+  #stage.mt2 .marker-tier-2 {{ display:block; }}
+  #stage.mt3 .marker-tier-3 {{ display:block; }}
+  #stage.mt4 .marker-tier-4 {{ display:block; }}
   /* bridge/tunnel names have their own 3-state toggle (off/on/on+length),
      independent of the zoom-based fuel-station names above */
   #stage.labels-visible.bridges-off .bridge-label {{ display:none; }}
@@ -2028,6 +2125,7 @@ def build_map(xlsx_path=DEFAULT_XLSX, title="Geographic Spine Map", tube_style_h
   const stage = document.getElementById('stage');
   const LABEL_ZOOM_THRESHOLD = 2.5;  // scale at which point names appear
   const BADGE_ZOOM_THRESHOLD = {BADGE_ZOOM_THRESHOLD};  // scale at which brand badges appear
+  const MARKER_TIER_ZOOM = {json.dumps(MARKER_TIER_ZOOM)};  // scale per declutter tier (see mapmaking.py)
   const MAP_MAX_ZOOM = {MAP_MAX_ZOOM};
   let scale = 1, panX = 0, panY = 0;
   let dragging = false, lastX = 0, lastY = 0;
@@ -2046,6 +2144,7 @@ def build_map(xlsx_path=DEFAULT_XLSX, title="Geographic Spine Map", tube_style_h
   function updateLabelVisibility() {{
     stage.classList.toggle('labels-visible', scale >= LABEL_ZOOM_THRESHOLD);
     stage.classList.toggle('badges-visible', scale >= BADGE_ZOOM_THRESHOLD);
+    MARKER_TIER_ZOOM.forEach((z, i) => stage.classList.toggle('mt' + (i + 1), scale >= z));
   }}
 
   function apply() {{

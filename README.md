@@ -185,6 +185,20 @@ badges - placed on its actual geographic side via `compass_side_sign()`
 A direction given as a place instead ("toward Antwerp") can't be resolved
 this way and falls back to one combined marker showing every brand mentioned.
 
+**Which side a one-sided station's triangle points to** normally comes
+straight from its own Latitude/Longitude (`real_side_sign()`): which side of
+the straight line between its segment's two junctions that coordinate falls
+on. That line can be a poor stand-in for the real road when the junctions are
+far apart (the A8 Leonberg → Ulm/Elchingen segment is ~100km, and the real A8
+doesn't run straight over that distance), so a station can end up on the
+wrong side even with an accurate coordinate. The `Side direction` column in
+the Points tab (north/south/east/west) overrides this when filled in - it's
+pre-filled for every one-sided point whose official name or Notes already
+state a direction (`Aichen Nord`, `Autohof Illertal-West`, ...), and used via
+`compass_side_sign()` instead of the coordinate-based guess. Add it for
+another station (or correct one) directly in Excel if its marker is on the
+wrong side.
+
 ### serways_brands.py: food/coffee brands from serways.de
 
 For a German Autobahn station, run `python3 serways_brands.py` to look up its
@@ -246,6 +260,22 @@ and the maximum zoom is high enough for the text to be fully readable.
 - A leader line may cross a junction name where branches are close together. The
   horizontal route layout (`--orientation horizontal`) doesn't use columns yet,
   so it has more of these crossings.
+
+### Marker declutter tiers (Kaart only)
+
+Bridge/tunnel and fuel-station *markers* (not their names - those still follow
+the zoom rule above) are visible well before zoom 2.5×, but not all at once:
+fully zoomed out shows a sparse, still-lively sample instead of either
+everything (illegible on a corridor with dozens of bridges a few hundred
+metres apart) or nothing (an empty-looking map). `assign_declutter_tiers()`
+greedily thins them into 5 tiers at build time - tier 0 is only markers that
+are mutually more than `MARKER_TIER_CLEARANCES[0]` SVG units apart, tier 1
+adds whatever's far enough from tier 0, and so on; whatever's left after the
+last tier (the densest clusters) only appears once zoomed in enough that nothing
+is that crowded any more. A bridge's priority (which one of several close
+together wins an earlier tier) is its length - the biggest bridges show up
+first. `MARKER_TIER_ZOOM` in the generated page's `<script>` sets the scale
+each tier appears at.
 
 Tuning constants are at the top of the script: `POINT_FONT`, `POINT_SUB_FONT`,
 `MAP_MAX_ZOOM`, `MAP_POI_FONT`, `MAP_POI_R`, `GRAPH_POINT_FONT`, `GRAPH_DIST_FONT`,
@@ -374,7 +404,7 @@ python3 osm_segment_distances.py --apply
 | `Junctions` | ID, name, roads meeting here, country, lat/lon, layout region, `Geography lock`, `Max move`, tier, type | all scripts |
 | `Roads` | Road ID, number, hierarchy (Primary/Secondary/Connector/Local), layout parameters | mapmaking |
 | `Segments` | Road edges between junctions: `Edge ID`, `From ID`, `To ID`, `Road`, `Distance (km)` | mapmaking, segment check |
-| `Points` | Bridges, tunnels, fuel stations and rest areas placed along a segment (`Edge ID`, `PositionOnEdge`), incl. `Fuel brand` and `Food brand(s)` | mapmaking, serways_brands |
+| `Points` | Bridges, tunnels, fuel stations and rest areas placed along a segment (`Edge ID`, `PositionOnEdge`), incl. `Fuel brand`, `Food brand(s)` and `Side direction` | mapmaking, serways_brands |
 | `River Junctions`, `River Segments` | River network | mapmaking (Kaart) |
 | `Border Nodes`, `Border Segments` | Country borders | mapmaking (Kaart) |
 | `NaturalRegions` | `Region name` + `Junction name`, one row per member junction | mapmaking (Kaart) |
