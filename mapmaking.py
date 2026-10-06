@@ -507,13 +507,12 @@ TIER_STYLE = {
 ROAD_WIDTH = {'Primary': 4.5, 'Secondary': 3.4, 'Connector': 2.5, 'Local': 2.0}
 
 PALETTE = [
-    # The first 33 are hand-picked originals; the rest are generated (see
-    # scripts/ - varied hue at several lightness/saturation bands) and
-    # filtered to stay visually distinct from each other and from the
-    # reserved marker colours (fuel red, POI gold, river blue, navy).
-    # ~80+ roads need this many to keep two unrelated roads from sharing
-    # a colour anywhere they're not already forced apart by the conflict
-    # check in assign_road_colours().
+    # The first 33 are hand-picked originals; the rest are generated (varied
+    # hue at several lightness/saturation bands) and filtered to stay
+    # visually distinct from each other and from the reserved marker
+    # colours (fuel red, POI gold, river blue, navy). assign_road_colours()
+    # gives every road its own entry, so this needs to comfortably outnumber
+    # the network's ~60 distinct roads.
     "#7F77DD", "#1D9E75", "#D85A30", "#D4537E", "#639922", "#BA7517",
     "#993C1D", "#0F6E56", "#993556", "#3B6D11", "#854F0B", "#26215C",
     "#04342C", "#4A1B0C", "#72243E", "#27500A", "#633806", "#5F5E5A",
@@ -1062,35 +1061,25 @@ def assign_road_labels(segments, polylines, X, Y, clearance=MAP_ROAD_LABEL_CLEAR
 
 
 def assign_road_colours(segments, palette):
-    road_junctions = defaultdict(set)
-    for seg in segments:
-        key = road_key(seg['road'])
-        road_junctions[key].update([seg['from'], seg['to']])
-    conflicts = defaultdict(set)
-    for jid in set().union(*road_junctions.values()) if road_junctions else set():
-        touching = [k for k, js in road_junctions.items() if jid in js]
-        for i in range(len(touching)):
-            for j in range(i+1, len(touching)):
-                conflicts[touching[i]].add(touching[j])
-                conflicts[touching[j]].add(touching[i])
+    """Every road gets its own colour, full stop - no two roads share one
+    unless there are literally more roads than usable palette entries
+    (unlikely: the palette has ~87, this network has ~60). Simpler and
+    strictly better than the old 'different colour only if two roads touch
+    or run close together' scheme: that was a deliberate compromise from
+    when the palette was too small (33) to give everyone a unique colour,
+    but with headroom to spare there's no reason two unrelated roads should
+    ever match, regardless of whether they're near each other on the map."""
+    road_keys = {road_key(seg['road']) for seg in segments}
     colours = {}
     for key, colour in PINNED_COLOURS.items():
-        if key in road_junctions:
+        if key in road_keys:
             colours[key] = colour
-    if 'LOKALE_WEG' in road_junctions:
+    if 'LOKALE_WEG' in road_keys:
         colours['LOKALE_WEG'] = LOCAL_ROAD_COLOUR
-    remaining = sorted((k for k in road_junctions if k not in colours),
-                       key=lambda k: -len(conflicts[k]))
-    for key in remaining:
-        used_nearby = {colours[n] for n in conflicts[key] if n in colours}
-        for c in palette:
-            if c == NAVY_BLUE:
-                continue
-            if c not in used_nearby:
-                colours[key] = c
-                break
-        else:
-            colours[key] = palette[len(colours) % len(palette)]
+    usable = [c for c in palette if c != NAVY_BLUE]
+    remaining = sorted(k for k in road_keys if k not in colours)
+    for i, key in enumerate(remaining):
+        colours[key] = usable[i % len(usable)]
     return colours
 
 
