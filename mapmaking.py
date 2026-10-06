@@ -1099,6 +1099,18 @@ def lab_distance(lab1, lab2):
     return math.sqrt(sum((p - q) ** 2 for p, q in zip(lab1, lab2)))
 
 
+def complementary_colour(hexcolor):
+    """The opposite colour on the colour wheel (hue rotated 180°, same
+    lightness/saturation) - used for a road-number label's text, so it
+    reads as a sign sitting on the road rather than text in the road's own
+    colour, which can visually blend into the line it's labelling."""
+    h = hexcolor.lstrip('#')
+    r, g, b = (int(h[i:i+2], 16) / 255 for i in (0, 2, 4))
+    hue, light, sat = colorsys.rgb_to_hls(r, g, b)
+    r2, g2, b2 = colorsys.hls_to_rgb((hue + 0.5) % 1.0, light, sat)
+    return f"#{int(round(r2*255)):02X}{int(round(g2*255)):02X}{int(round(b2*255)):02X}"
+
+
 def road_importance(segments):
     """A road's weight for the colour solver below: longer and/or more
     fragmented roads (more segments) matter more, on a log scale so one
@@ -1503,6 +1515,59 @@ def border_crossing_colours(jid, segments, road_colours):
 
 # ------------------------------------------------------------- render ---
 
+JUNCTION_DEBUNDLE_OFFSET = 0.12   # pos-units of sideways separation per lane-step near a junction
+JUNCTION_DEBUNDLE_REACH = 0.9     # pos-units: how far from the junction the nudge extends
+
+
+def debundle_junction_overlaps(segments, polylines, roads, tube_style_hierarchies):
+    """Where 2+ tube-style segments leave (or arrive at) the same junction
+    on the same - or near-identical - angle, their lines would overlap
+    right at the junction: with --tube-strict there are only 8 allowed
+    angles, so two genuinely different roads heading roughly the same way
+    out of a junction often get snapped onto the exact same one. Nudges
+    every line but the middle one sideways for a short stretch near the
+    junction (tapering back to the real route just beyond it), so they
+    read as separate lines fanning out instead of one overlapping stroke."""
+    tube_style_hierarchies = tube_style_hierarchies or set()
+    groups = defaultdict(list)
+    for seg in segments:
+        poly = polylines.get(seg['edge_id'])
+        if not poly or len(poly) < 2:
+            continue
+        if segment_hierarchy(seg, roads) not in tube_style_hierarchies:
+            continue
+        for end, jid, p_near, p_next in (('from', seg['from'], poly[0], poly[1]),
+                                         ('to', seg['to'], poly[-1], poly[-2])):
+            dx, dy = p_next[0] - p_near[0], p_next[1] - p_near[1]
+            if math.hypot(dx, dy) < 1e-6:
+                continue
+            ang = round(math.degrees(math.atan2(dy, dx)))
+            groups[(jid, ang)].append((seg['edge_id'], end))
+
+    for (_jid, ang), members in groups.items():
+        if len(members) < 2:
+            continue
+        members = sorted(members)
+        n = len(members)
+        rad = math.radians(ang)
+        perp = (-math.sin(rad), math.cos(rad))
+        for i, (eid, end) in enumerate(members):
+            lane = i - (n - 1) / 2
+            if lane == 0:
+                continue  # the middle one (or the sole extra on a pair) stays put
+            poly = list(polylines[eid])
+            near, nxt = (poly[0], poly[1]) if end == 'from' else (poly[-1], poly[-2])
+            seg_len = math.hypot(nxt[0] - near[0], nxt[1] - near[1])
+            if seg_len < 1e-6:
+                continue
+            t = min(JUNCTION_DEBUNDLE_REACH, seg_len * 0.5) / seg_len
+            stub = (near[0] + (nxt[0]-near[0])*t + perp[0]*lane*JUNCTION_DEBUNDLE_OFFSET,
+                    near[1] + (nxt[1]-near[1])*t + perp[1]*lane*JUNCTION_DEBUNDLE_OFFSET)
+            poly.insert(1 if end == 'from' else len(poly) - 1, stub)
+            polylines[eid] = poly
+    return polylines
+
+
 def resolve_road_crossings(segments, polylines, roads, max_passes=3):
     """Sections 14/spec-wide rule: a segment may only cross another via a
     shared junction. Where two unrelated segments' straight lines happen to
@@ -1780,6 +1845,7 @@ def render_map(junctions, segments, pos, roads, points, border_data, border_node
     road_colours = assign_road_colours(segments, PALETTE, pos=pos, X=X, Y=Y)
     polylines = build_road_polylines(junctions, segments, pos, roads,
                                      tube_style_hierarchies=tube_style_hierarchies, angles_deg=tube_angles)
+    polylines = debundle_junction_overlaps(segments, polylines, roads, tube_style_hierarchies)
     polylines = resolve_road_crossings(segments, polylines, roads)
     road_labels = assign_road_labels(segments, polylines, X, Y)
 
@@ -1914,10 +1980,13 @@ def render_map(junctions, segments, pos, roads, points, border_data, border_node
         placer.add_rotated_box(sx, sy, angle, -rw / 2, -rh * 0.7, rw, rh)
         occupied_label_boxes.append((sx - rw / 2, sy - rh, sx + rw / 2, sy + rh))
         colour = road_colours.get(canon, '#888')
+        text_colour = complementary_colour(colour)
         road_label_svg.append(
             f'<g transform="translate({sx:.1f} {sy:.1f}) rotate({angle:.1f})">'
+            f'<rect x="{-rw/2:.1f}" y="{-rh*0.7:.1f}" width="{rw:.0f}" height="{rh:.1f}" rx="3" '
+            f'fill="{colour}" fill-opacity="0.22"/>'
             f'<text x="0" y="{rh * 0.3 - 1:.1f}" text-anchor="middle" font-size="{MAP_ROAD_FONT}" '
-            f'font-weight="700" fill="{colour}" stroke="#FAFAF7" stroke-width="{MAP_ROAD_FONT * 0.32:.2f}" '
+            f'font-weight="700" fill="{text_colour}" stroke="#FAFAF7" stroke-width="{MAP_ROAD_FONT * 0.22:.2f}" '
             f'stroke-linejoin="round" paint-order="stroke">{html_lib.escape(canon)}</text>'
             f'</g>'
         )
