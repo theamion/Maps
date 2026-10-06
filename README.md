@@ -15,11 +15,14 @@ in the script's own folder, whichever directory you run it from.
 | `Holidays.xlsx` | **Reference.** The original source (`Database` sheet), used by `osm_verify_junctions.py` as its first source for coordinates |
 | `junctions_topology_v4.xlsx` | Previous workbook, which includes the research sheets `Tankstations` and `Nieuwe Points` |
 | `mapmaking.py` | Map and route diagram in one HTML page with two tabs → `holidays.html` |
+| `map_icons.py` | The brand-icon system `mapmaking.py` draws on fuel stations: loading `icons/fuel` and `icons/food`, the coloured-badge fallback, and the `Fuel brand`/`Food brand(s)` text parsing |
+| `icons/fuel/`, `icons/food/` | The actual logo image files, one per brand |
+| `serways_brands.py` | Finds each German station's fast-food/coffee brand(s) on serways.de → `Food brand(s)` in the Points tab |
 | `osm_verify_junctions.py` | Checks junction coordinates against Holidays.xlsx and OpenStreetMap |
 | `osm_segment_distances.py` | Checks segment distances against OSRM driving distances |
 | `osm_point_leg_distances.py` | Measures each fuel station's distance along its segment with OSRM → `OSM DistanceFromStart (km)` in the Points tab (used by the route diagram) |
 | `apply_osm_coords.py`, `apply_osm_distances.py` | Copy reviewed OSM results into `Latitude`/`Longitude` and `Distance (km)` |
-| `osm_junction_cache.json`, `osm_segment_cache.json` | Caches for the OSM checks, so runs can resume |
+| `osm_junction_cache.json`, `osm_segment_cache.json`, `serways_cache.json` | Caches for the OSM/serways checks, so runs can resume |
 | `generate_map_v2.deprecatedpy`, `generate_graph.deprecatedpy` | Superseded by `mapmaking.py`. Kept for reference only |
 
 ## Publishing
@@ -45,7 +48,8 @@ generated page shows their data.
 - Python 3
 - `openpyxl` (all scripts)
 - `networkx` (`mapmaking.py`)
-- `requests` (the two `osm_*` scripts)
+- `requests` (the two `osm_*` scripts; `serways_brands.py` only needs the
+  standard library)
 
 ```bash
 pip install openpyxl networkx requests
@@ -152,6 +156,64 @@ in bold, and has its own toggle. Each point is drawn on the segment named in its
 Hovering over a star shows its category and notes. Points whose segment doesn't
 exist in the Segments tab are skipped.
 
+### Brand badges (fuel stations)
+
+A tankstation/Autohof point gets a row of small badges under its name: one per
+fuel brand (from the `Fuel brand` column) and up to 4 fast-food/coffee chains,
+preferably from the structured `Food brand(s)` column (`serways_brands.py`
+below), falling back to recognising a known chain's name in the free-text
+`Facilities` column when that's empty. Where we have the real logo on file
+(`icons/fuel`, `icons/food`, loaded by `map_icons.py`) it's shown as-is - these
+are genuine brand logos, used only to show which fuel/food brand is actually
+present at that real location, not decorative or promotional use. A brand
+with no icon file yet falls back to a coloured badge (background colour + a
+short code), still better than plain text. Add a brand to `FUEL_BRAND_COLOURS`/
+`FOOD_BRAND_COLOURS` in `map_icons.py` to recognise more of them, and an entry
+to `FUEL_ICON_FILES`/`FOOD_ICON_FILES` once you've added its image file.
+
+On the Kaart tab the badges are a further zoom stage past the station name
+(`BADGE_ZOOM_THRESHOLD` in `mapmaking.py`, names already show from 2.5×); on a
+route tab the fuel-station square shows the fuel brand's icon (or, lacking
+one, is tinted with its badge colour).
+
+**Different brand per side:** when `Fuel brand` or `Food brand(s)` uses the
+"X east; Y west" convention (also north/south - a service area with a
+different operator on each physical side of the road), the Kaart tab draws
+two separate one-sided markers instead of one, each with only that side's
+badges - placed on its actual geographic side via `compass_side_sign()`
+(`mapmaking.py`), regardless of which way the schematic line happens to run.
+A direction given as a place instead ("toward Antwerp") can't be resolved
+this way and falls back to one combined marker showing every brand mentioned.
+
+### serways_brands.py: food/coffee brands from serways.de
+
+For a German Autobahn station, run `python3 serways_brands.py` to look up its
+real fast-food/coffee brand(s) on serways.de (the consumer site of Tank &
+Rast, which operates almost every Autobahn service area) and write them into
+`Food brand(s)` in the Points tab. It matches a Points row to a serways.de
+page by normalising its `Name` the same way serways.de names its pages
+(umlauts expanded, lower-cased, direction suffix kept if the name already has
+one); most Points rows won't match, since most of this network is Dutch,
+Belgian or Austrian and outside Tank & Rast's network. A German-looking name
+in the run's "not matched" list is worth a manual look - add a line to
+`NAME_OVERRIDES` at the top of the script (or just say so in chat) once you
+know its actual serways.de slug. Like the `osm_*.py` scripts, results are
+cached (`serways_cache.json`) so an interrupted run can just be resumed, and
+it never touches `Fuel brand` or `Facilities` - only `Food brand(s)`, and
+only for a row it could match.
+
+### Region blobs (Kaart only)
+
+The workbook's **NaturalRegions** tab (`Region name`, `Junction name` - one
+row per member junction) draws a soft green background shape behind a leisure
+area - currently Ardennen & Eifel and Sauerland - with a mountain icon and
+name, like the green "highlight" areas on a hand-drawn touring map. The blob
+is that region's junctions' convex hull, padded outward and rounded into an
+organic shape (`inflate_blob_points`/`smooth_closed_path` in `mapmaking.py`).
+Add rows to NaturalRegions for another region - the junction names must exist
+in the Junctions tab, and more of them (especially ones that outline the
+area) give a better-fitting blob.
+
 ### How the map layout works
 
 1. **Projection:** junction lat/lon are projected to normalised map units
@@ -189,7 +251,10 @@ Tuning constants are at the top of the script: `POINT_FONT`, `POINT_SUB_FONT`,
 `MAP_MAX_ZOOM`, `MAP_POI_FONT`, `MAP_POI_R`, `GRAPH_POINT_FONT`, `GRAPH_DIST_FONT`,
 `GRAPH_JUNCTION_FONT`, `GRAPH_ROAD_FONT`, `GRAPH_POI_R`, `LANE_HEIGHT`, `STEP_X`, `GRAPH_MAX_ZOOM`, `LABEL_PRIORITY`,
 `UNIT_PER_DEGREE`, `CANVAS_SCALE`, `TIER_STYLE`, `ROAD_WIDTH`, `PALETTE` and
-`PINNED_COLOURS`.
+`PINNED_COLOURS`. For region blobs: `REGION_BLOB_FILL`, `REGION_BLOB_PAD` and
+`REGION_LABEL_FONT`/`REGION_LABEL_COLOUR`. For brand badges: `BADGE_ZOOM_THRESHOLD`
+in `mapmaking.py`, and `ICON_SIZE`, `FUEL_BRAND_COLOURS`, `FOOD_BRAND_COLOURS`,
+`FUEL_ICON_FILES`, `FOOD_ICON_FILES` in `map_icons.py`.
 
 ## OpenStreetMap checks
 
@@ -309,8 +374,9 @@ python3 osm_segment_distances.py --apply
 | `Junctions` | ID, name, roads meeting here, country, lat/lon, layout region, `Geography lock`, `Max move`, tier, type | all scripts |
 | `Roads` | Road ID, number, hierarchy (Primary/Secondary/Connector/Local), layout parameters | mapmaking |
 | `Segments` | Road edges between junctions: `Edge ID`, `From ID`, `To ID`, `Road`, `Distance (km)` | mapmaking, segment check |
-| `Points` | Bridges, tunnels, fuel stations and rest areas placed along a segment (`Edge ID`, `PositionOnEdge`) | mapmaking |
+| `Points` | Bridges, tunnels, fuel stations and rest areas placed along a segment (`Edge ID`, `PositionOnEdge`), incl. `Fuel brand` and `Food brand(s)` | mapmaking, serways_brands |
 | `River Junctions`, `River Segments` | River network | mapmaking (Kaart) |
 | `Border Nodes`, `Border Segments` | Country borders | mapmaking (Kaart) |
+| `NaturalRegions` | `Region name` + `Junction name`, one row per member junction | mapmaking (Kaart) |
 | `Rivers`, `Points of Interest` | Reference data | none |
 | `Map Model Notes` | Explains the fields | none |

@@ -37,6 +37,9 @@ from collections import defaultdict
 import networkx as nx
 from openpyxl import load_workbook
 
+import map_icons
+from map_icons import text_width
+
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 DEFAULT_XLSX = os.path.join(SCRIPT_DIR, 'junctions_topology_v5.xlsx')
 DEFAULT_OUTPUT = os.path.join(SCRIPT_DIR, 'holidays.html')
@@ -48,6 +51,7 @@ DEFAULT_OUTPUT = os.path.join(SCRIPT_DIR, 'holidays.html')
 
 POINT_FONT = 4.5          # map: point name size, in SVG units
 POINT_SUB_FONT = 3.8      # map: second line (bridge length / fuel brand)
+BADGE_ZOOM_THRESHOLD = 4.5  # map: scale at which brand badges appear (names already show from 2.5x)
 MAP_POI_FONT = 5.5        # map: point-of-interest name size
 MAP_POI_R = 6.0           # map: point-of-interest star radius
 MAP_MAX_ZOOM = 16         # map: max zoom - POINT_FONT * 16 = 72px text
@@ -69,24 +73,6 @@ GRAPH_BRIDGE_CATEGORIES = ("brug (rivier)", "brug (dal)", "Brug", "tunnel", "eco
 LABEL_PRIORITY = {'poi': -1, 'tankstation': 0, 'autohof': 0, 'tunnel': 1, 'brug (rivier)': 2,
                   'ecoduct': 3, 'brug': 4, 'brug (dal)': 5}
 
-_NARROW = set("iljtfrI.,:;'|!()[]- ")
-_WIDE = set("mwMW@%&")
-
-
-def text_width(text, font_size):
-    """Conservative Arial width estimate (per-character classes), so a
-    placed label is never wider on screen than the box reserved for it."""
-    w = 0.0
-    for ch in str(text or ''):
-        if ch in _NARROW:
-            w += 0.32
-        elif ch in _WIDE:
-            w += 0.86
-        elif ch.isupper():
-            w += 0.70
-        else:
-            w += 0.57
-    return w * font_size * 1.03
 
 
 def nearest_on_box(x, y, box):
@@ -467,7 +453,7 @@ def label_block_svg(group_class, lines, box, ax, ay, leader, halo, leader_width)
 # =====================================================================
 
 UNIT_PER_DEGREE = 10.0     # normalised-unit scale for Geography Lock / Max Move
-CANVAS_SCALE = 60.0        # px per normalised unit, for the final SVG
+CANVAS_SCALE = 90.0        # px per normalised unit, for the final SVG
 
 TIER_STYLE = {
     'Small':  dict(radius_px=5.0, outline_px=1.2),
@@ -1046,6 +1032,7 @@ def load_points_v2(wb, junctions):
             'lat': row[idx.get('Latitude')], 'lon': row[idx.get('Longitude')],
             'brand': row[idx.get('Fuel brand')] if 'Fuel brand' in idx else None,
             'facilities': row[idx.get('Facilities')] if 'Facilities' in idx else None,
+            'food_brand': row[idx.get('Food brand(s)')] if 'Food brand(s)' in idx else None,
         })
     return points
 
@@ -1066,6 +1053,25 @@ def real_side_sign(from_lat, from_lon, to_lat, to_lon, pt_lat, pt_lon):
     pt_dx, pt_dy = px - fx, py - fy
     cross = road_dx * pt_dy - road_dy * pt_dx
     return 1 if cross >= 0 else -1
+
+
+# a small lat/lon nudge in each compass direction, used only to ask
+# real_side_sign() "which schematic side is geographically east/west/
+# north/south here" - the actual distance doesn't matter, only its sign
+COMPASS_PROBE_OFFSET = {'east': (0, 0.05), 'west': (0, -0.05),
+                         'north': (0.05, 0), 'south': (-0.05, 0)}  # (dlat, dlon)
+
+
+def compass_side_sign(from_lat, from_lon, to_lat, to_lon, compass):
+    """Which schematic side (+1/-1, same convention as real_side_sign) a
+    compass direction ('east'/'west'/'north'/'south') falls on for this
+    segment's real geometry - so a station with a different brand on each
+    physical side of the road (e.g. 'Shell east; Eni west') places each
+    brand's badge on the side that's actually geographically correct,
+    whichever way the schematic line happens to run."""
+    dlat, dlon = COMPASS_PROBE_OFFSET[compass]
+    mid_lat, mid_lon = (from_lat + to_lat) / 2, (from_lon + to_lon) / 2
+    return real_side_sign(from_lat, from_lon, to_lat, to_lon, mid_lat + dlat, mid_lon + dlon)
 
 
 def point_at_fraction_on_polyline(poly, frac):
@@ -1154,23 +1160,6 @@ def haversine_km(lat1, lon1, lat2, lon2):
     dphi, dl = math.radians(lat2-lat1), math.radians(lon2-lon1)
     a = math.sin(dphi/2)**2 + math.cos(p1)*math.cos(p2)*math.sin(dl/2)**2
     return 2 * R * math.asin(math.sqrt(a))
-
-
-def fuel_brand_badge(brand, facilities):
-    """Short text badge combining the fuel brand with up to 2 recognisable
-    amenities (fast food / coffee chains) found in the free-text Facilities
-    field - a lightweight text stand-in for a brand logo, since embedding
-    real logo images in a generated SVG isn't practical here."""
-    parts = []
-    if brand:
-        parts.append(str(brand).strip())
-    if facilities:
-        text = str(facilities)
-        known = ["McDonald's", 'Burger King', 'Starbucks', 'Subway', 'NORDSEE',
-                 "Dallmayr", 'Segafredo', 'BrotZeit', 'Coffee Fellows']
-        found = [k for k in known if k.lower() in text.lower()]
-        parts.extend(found[:2])
-    return ' · '.join(parts) if parts else None
 
 
 def fuel_marker_svg(cx, cy, angle_deg, sides, colour, side=1, length=10, base=4.5):
@@ -1357,12 +1346,136 @@ def river_bow_control(a, b, road_polylines, max_tries=12):
     return (mx + perp[0]*base_bow, my + perp[1]*base_bow)
 
 
+# ------------------------------------------------------------- regions ---
+# Soft background "blobs" that highlight a leisure area (Ardennes & Eifel,
+# Sauerland, ...), like the green shapes on a hand-drawn touring map. Each
+# region is just a list of junction names roughly on its edge or inside it;
+# the blob is their convex hull, padded outward and rounded into an organic
+# shape. The regions themselves live in the workbook's NaturalRegions tab
+# (Region name, Junction name - one row per member junction), not here.
+
+def load_natural_regions(wb):
+    if 'NaturalRegions' not in wb.sheetnames:
+        return []
+    ws = wb['NaturalRegions']
+    header = [c.value for c in ws[1]]
+    idx = {h: i for i, h in enumerate(header)}
+    if 'Region name' not in idx or 'Junction name' not in idx:
+        return []
+    regions, by_name = [], {}
+    for row in ws.iter_rows(min_row=2, values_only=True):
+        name, jname = row[idx['Region name']], row[idx['Junction name']]
+        if not name or not jname:
+            continue
+        if name not in by_name:
+            by_name[name] = dict(name=name, junctions=[])
+            regions.append(by_name[name])
+        by_name[name]['junctions'].append(jname)
+    return regions
+
+
+REGION_BLOB_FILL = "#DCEBD2"
+REGION_BLOB_PAD = 0.9       # normalised units of outward padding beyond the hull
+REGION_LABEL_COLOUR = "#4B7A3C"
+REGION_LABEL_FONT = 17
+
+
+def convex_hull(points):
+    """Monotone-chain convex hull. Returns vertices in CCW order."""
+    pts = sorted(set(points))
+    if len(pts) <= 2:
+        return pts
+
+    def cross(o, a, b):
+        return (a[0]-o[0])*(b[1]-o[1]) - (a[1]-o[1])*(b[0]-o[0])
+
+    lower = []
+    for p in pts:
+        while len(lower) >= 2 and cross(lower[-2], lower[-1], p) <= 0:
+            lower.pop()
+        lower.append(p)
+    upper = []
+    for p in reversed(pts):
+        while len(upper) >= 2 and cross(upper[-2], upper[-1], p) <= 0:
+            upper.pop()
+        upper.append(p)
+    return lower[:-1] + upper[:-1]
+
+
+def inflate_blob_points(hull, pad):
+    """Push every hull vertex outward from the centroid by `pad`, then
+    insert a slightly-more-pushed midpoint on every edge, so the closed
+    spline drawn through the result reads as a soft organic blob rather
+    than a visible straight-edged hull. Returns (points, centroid)."""
+    cx = sum(p[0] for p in hull) / len(hull)
+    cy = sum(p[1] for p in hull) / len(hull)
+    pushed = []
+    for x, y in hull:
+        dx, dy = x - cx, y - cy
+        dist = math.hypot(dx, dy) or 1
+        scale = (dist + pad) / dist
+        pushed.append((cx + dx*scale, cy + dy*scale))
+    out = []
+    n = len(pushed)
+    for i in range(n):
+        a, b = pushed[i], pushed[(i+1) % n]
+        out.append(a)
+        mx, my = (a[0]+b[0])/2, (a[1]+b[1])/2
+        dx, dy = mx - cx, my - cy
+        dist = math.hypot(dx, dy) or 1
+        bulge = (dist + pad*0.35) / dist
+        out.append((cx + dx*bulge, cy + dy*bulge))
+    return out, (cx, cy)
+
+
+def smooth_closed_path(points):
+    """Closed Catmull-Rom-through-cubic-Bezier path through `points`, for
+    an organic rounded outline (used for the region blob backgrounds)."""
+    n = len(points)
+    if n < 3:
+        return ""
+    d = [f"M {points[0][0]:.1f} {points[0][1]:.1f}"]
+    for i in range(n):
+        p0, p1, p2, p3 = points[(i-1) % n], points[i], points[(i+1) % n], points[(i+2) % n]
+        c1 = (p1[0] + (p2[0]-p0[0])/6, p1[1] + (p2[1]-p0[1])/6)
+        c2 = (p2[0] - (p3[0]-p1[0])/6, p2[1] - (p3[1]-p1[1])/6)
+        d.append(f"C {c1[0]:.1f} {c1[1]:.1f} {c2[0]:.1f} {c2[1]:.1f} {p2[0]:.1f} {p2[1]:.1f}")
+    d.append("Z")
+    return " ".join(d)
+
+
+def region_blobs_svg(regions, junctions, pos, X, Y):
+    """Returns (fill_svg, label_svg): the blob fills (drawn first, under
+    borders/rivers/roads) and their icon+name labels (drawn last, over
+    roads, with a halo so they stay readable)."""
+    name_to_id = {j['name']: jid for jid, j in junctions.items() if j.get('name')}
+    fills, labels = [], []
+    for region in regions:
+        pts = [tuple(pos[name_to_id[n]]) for n in region['junctions']
+               if n in name_to_id and name_to_id[n] in pos]
+        hull = convex_hull(pts)
+        if len(hull) < 3:
+            continue
+        blob_pts, (cx, cy) = inflate_blob_points(hull, REGION_BLOB_PAD)
+        path = smooth_closed_path([(X(x), Y(y)) for x, y in blob_pts])
+        fills.append(f'<path d="{path}" fill="{REGION_BLOB_FILL}" stroke="none"/>')
+        lx, ly = X(cx), Y(cy)
+        labels.append(map_icons.mountain_icon_svg(lx, ly - 14, colour=REGION_LABEL_COLOUR))
+        labels.append(
+            f'<text x="{lx:.1f}" y="{ly + 10:.1f}" text-anchor="middle" font-size="{REGION_LABEL_FONT}" '
+            f'font-weight="700" fill="{REGION_LABEL_COLOUR}" stroke="#FAFAF7" stroke-width="3" '
+            f'stroke-linejoin="round" paint-order="stroke">{html_lib.escape(region["name"])}</text>')
+    return "".join(fills), "".join(labels)
+
+
 def render_map(junctions, segments, pos, roads, points, border_data, border_node_pos,
-                river_data=None, ambiguous_crossings=None, tube_style_hierarchies=None, pois=None):
+                river_data=None, ambiguous_crossings=None, tube_style_hierarchies=None, pois=None,
+                regions=None):
     """Assembles the SVG following the render order in spec section 16:
     background, borders, rivers, local -> connector -> secondary -> primary
     roads, road points, normal junctions/exits, border crossings,
     tripoints, labels."""
+    map_icons.reset_icon_registry()  # this svg gets its own self-contained <defs>
     ambiguous_crossings = ambiguous_crossings or []
     xs = [p[0] for p in pos.values()] + [p[0] for p in border_node_pos.values() if p]
     ys = [p[1] for p in pos.values()] + [p[1] for p in border_node_pos.values() if p]
@@ -1383,6 +1496,12 @@ def render_map(junctions, segments, pos, roads, points, border_data, border_node
     parts = [f'<svg width="{width:.0f}" height="{height:.0f}" viewBox="0 0 {width:.0f} {height:.0f}" '
              f'xmlns="http://www.w3.org/2000/svg" font-family="Arial, sans-serif">',
              f'<rect x="0" y="0" width="{width:.0f}" height="{height:.0f}" fill="#FAFAF7"/>']
+
+    # region blobs (Ardennes & Eifel, Sauerland, ...): fill goes in now, at
+    # the very bottom, under borders/rivers/roads; the icon+name label is
+    # added later, over the roads, so it stays legible
+    region_blob_fill_svg, region_blob_label_svg = region_blobs_svg(regions or [], junctions, pos, X, Y)
+    parts.append(region_blob_fill_svg)
 
     # Compute river paths first (avoiding roads, which are already final),
     # then compute borders LAST of all three - now that both the road and
@@ -1529,7 +1648,43 @@ def render_map(junctions, segments, pos, roads, points, border_data, border_node
     for eid in via_by_edge:
         via_by_edge[eid].sort(key=lambda p: (p['order_on_segment'], p['pos_on_edge']))
 
-    # every point's marker position/side, and its marker as an obstacle
+    # brand badges for tankstation/autohof points, resolved once per point -
+    # both the marker(s) drawn under the road further down and the label
+    # loop below need the same east/west (etc.) split, and resolving it
+    # needs the segment's real endpoints, which only this loop has handy
+    seg_by_edge_id = {s['edge_id']: s for s in segments}
+    point_badge_info = {}
+    for p in points:
+        cat = (p['category'] or '').lower()
+        if cat not in ('tankstation', 'autohof'):
+            continue
+        mode, data = map_icons.brand_badge_entries(p.get('brand'), p.get('food_brand'), p.get('facilities'))
+        if mode == 'single':
+            point_badge_info[p['id']] = dict(mode='single', entries=data)
+            continue
+        seg = seg_by_edge_id.get(p['edge_id'])
+        fj = junctions.get(seg['from']) if seg else None
+        tj = junctions.get(seg['to']) if seg else None
+        sides_out = {}
+        if fj and tj and fj.get('lat') is not None and tj.get('lat') is not None:
+            for side_word, entries in data.items():
+                sign = compass_side_sign(fj['lat'], fj['lon'], tj['lat'], tj['lon'], side_word)
+                sides_out[sign] = (side_word, entries)
+        if len(sides_out) == 2:
+            point_badge_info[p['id']] = dict(mode='sided', sides=sides_out)
+        else:
+            # couldn't resolve two distinct physical sides - show one
+            # combined marker/badge row rather than guessing which is which
+            seen, merged = set(), []
+            for lst in data.values():
+                for e in lst:
+                    if e['code'] not in seen:
+                        seen.add(e['code']); merged.append(e)
+            point_badge_info[p['id']] = dict(mode='single', entries=merged)
+
+    # every point's marker position/side, and its marker as an obstacle -
+    # a tankstation/autohof with a different brand per side becomes two
+    # one-sided entries (one per physical side) instead of one
     point_marks = []
     for seg in segments:
         poly = polylines.get(seg['edge_id'])
@@ -1540,6 +1695,16 @@ def render_map(junctions, segments, pos, roads, points, border_data, border_node
             (px, py), ang = point_at_fraction_on_polyline(poly, p['pos_on_edge'])
             sx, sy = X(px), Y(py)
             cat = (p['category'] or '').lower()
+            info = point_badge_info.get(p['id']) if cat in ('tankstation', 'autohof') else None
+            if info and info['mode'] == 'sided':
+                for sign, (side_word, entries) in info['sides'].items():
+                    box, reach = marker_extent(sx, sy, ang, cat, 1, sign, p.get('length_m'))
+                    if box:
+                        placer.add_box(box)
+                    point_marks.append(dict(p=p, sx=sx, sy=sy, ang=ang, cat=cat, side=sign,
+                                            box=box, reach=reach, badges=entries,
+                                            name_suffix=f" ({side_word.capitalize()})"))
+                continue
             side = 1
             if cat in ('tankstation', 'autohof') and p['sides'] == 1 and p.get('lat') is not None \
                     and p.get('lon') is not None and fj and tj \
@@ -1549,7 +1714,8 @@ def render_map(junctions, segments, pos, roads, points, border_data, border_node
             if box:
                 placer.add_box(box)
             point_marks.append(dict(p=p, sx=sx, sy=sy, ang=ang, cat=cat, side=side,
-                                    box=box, reach=reach))
+                                    box=box, reach=reach, badges=(info['entries'] if info else []),
+                                    name_suffix=''))
 
     # points of interest: a star on their segment's line (drawn on top of
     # the roads), labelled first so they get the closest spots
@@ -1569,22 +1735,25 @@ def render_map(junctions, segments, pos, roads, points, border_data, border_node
         p, cat = pm['p'], pm['cat']
         if not p['name']:
             continue
-        lines = [(p['name'], POINT_FONT, '#4A4A47', '')]
+        display_name = p['name'] + pm.get('name_suffix', '')
+        lines = [(display_name, POINT_FONT, '#4A4A47', '')]
+        badge_entries = pm.get('badges', []) if cat in ('tankstation', 'autohof') else []
         if cat == 'poi':
             group_class = 'poi'
-            lines = [(p['name'], MAP_POI_FONT, POI_TEXT, 'poi-name')]
+            lines = [(display_name, MAP_POI_FONT, POI_TEXT, 'poi-name')]
         elif cat in BAR_CATEGORIES:
             group_class = 'zoom-point-label bridge-label'
             if p.get('length_m'):
                 lines.append((f"{p['length_m']:.0f}m", POINT_SUB_FONT, '#7A7A76', 'bridge-length-label'))
         else:
             group_class = 'zoom-point-label'
-            if cat in ('tankstation', 'autohof'):
-                badge = fuel_brand_badge(p.get('brand'), p.get('facilities'))
-                if badge:
-                    lines.append((badge, POINT_SUB_FONT, '#6B6B67', ''))
-        w = max(text_width(t, size) for t, size, _c, _k in lines)
-        h = sum(size * LINE_HEIGHT for _t, size, _c, _k in lines)
+        # brand badges (if any) are reserved as extra height/width below the
+        # name line, but rendered as their own icon tiles (own zoom gate),
+        # not as a text line through label_block_svg
+        badge_w, badge_h, _widths = map_icons.badge_row_metrics(badge_entries)
+        name_h = sum(size * LINE_HEIGHT for _t, size, _c, _k in lines)
+        w = max([text_width(t, size) for t, size, _c, _k in lines] + [badge_w])
+        h = name_h + badge_h
         # one-sided fuel stations: label on the side the marker points to
         pref = pm['side'] if cat in ('tankstation', 'autohof') else 1
         box, leader = placer.place(pm['sx'], pm['sy'], w, h, pm['ang'] + 90, pref_side=pref,
@@ -1593,6 +1762,8 @@ def render_map(junctions, segments, pos, roads, points, border_data, border_node
                                                halo='#FAFAF7', leader_width=0.35)
         point_leader_svg.append(leader_svg)
         point_label_svg.append(text_svg)
+        if badge_entries:
+            point_label_svg.append(map_icons.badge_row_svg(badge_entries, box[0], box[1] + name_h))
 
     # 4-7. roads, local -> connector -> secondary -> primary (so primary
     # draws on top), each with a white casing underneath for separation
@@ -1623,11 +1794,19 @@ def render_map(junctions, segments, pos, roads, points, border_data, border_node
                 if cat in BAR_CATEGORIES:
                     parts.append(bar_svg(sx, sy, ang, MARKER_COLOUR.get(cat, '#999'), length_m=p.get('length_m')))
                 elif cat in ('tankstation', 'autohof'):
-                    side = 1
-                    if p['sides'] == 1 and p.get('lat') is not None and p.get('lon') is not None:
-                        if fj and tj and fj['lat'] is not None and tj['lat'] is not None:
-                            side = real_side_sign(fj['lat'], fj['lon'], tj['lat'], tj['lon'], p['lat'], p['lon'])
-                    parts.append(fuel_marker_svg(sx, sy, ang, p['sides'], MARKER_COLOUR.get(cat, '#A83232'), side=side))
+                    info = point_badge_info.get(p['id'])
+                    if info and info['mode'] == 'sided':
+                        # a different brand per side: two one-sided markers,
+                        # each on its real geographic side, instead of one
+                        # diamond spanning both
+                        for sign, (_side_word, _entries) in info['sides'].items():
+                            parts.append(fuel_marker_svg(sx, sy, ang, 1, MARKER_COLOUR.get(cat, '#A83232'), side=sign))
+                    else:
+                        side = 1
+                        if p['sides'] == 1 and p.get('lat') is not None and p.get('lon') is not None:
+                            if fj and tj and fj['lat'] is not None and tj['lat'] is not None:
+                                side = real_side_sign(fj['lat'], fj['lon'], tj['lat'], tj['lon'], p['lat'], p['lon'])
+                        parts.append(fuel_marker_svg(sx, sy, ang, p['sides'], MARKER_COLOUR.get(cat, '#A83232'), side=side))
                 # distance from this segment's From junction to this point,
                 # in real km (haversine on true lat/lon) - own colour/toggle,
                 # independent of the point-name labels above
@@ -1690,6 +1869,9 @@ def render_map(junctions, segments, pos, roads, points, border_data, border_node
         x, y = pos[jid]
         parts.append(junction_circle_svg(X(x), Y(y), 'Tripoint', j['tier']))
 
+    # region blob labels: over the roads/junctions, under the point labels
+    parts.append(region_blob_label_svg)
+
     # point labels on top of everything else (their halo keeps them
     # readable where they have to cross a line)
     parts.extend(poi_star_svg)
@@ -1712,6 +1894,7 @@ def render_map(junctions, segments, pos, roads, points, border_data, border_node
             'poly': [[round(X(x), 1), round(Y(y), 1)] for x, y in poly],
         })
 
+    parts.append(map_icons.icon_defs_svg())
     parts.append('</svg>')
     return "\n".join(parts), road_colours, width, height, segments_geo, placer.stats
 
@@ -1736,6 +1919,7 @@ def build_map(xlsx_path=DEFAULT_XLSX, title="Geographic Spine Map", tube_style_h
 
     points = load_points_v2(wb, junctions)
     pois = load_pois(wb, junctions, {s['edge_id']: (s['from'], s['to']) for s in segments})
+    regions = load_natural_regions(wb)
 
     # river positions: project River Junctions geographically the same way,
     # snap bridge-point positions from the already-built road polylines
@@ -1786,6 +1970,7 @@ def build_map(xlsx_path=DEFAULT_XLSX, title="Geographic Spine Map", tube_style_h
         junctions, segments, pos, roads, points, border_data or {}, border_node_pos,
         river_data={'segments': river_segs, 'pos': river_pos} if river_segs else None,
         ambiguous_crossings=ambiguous, tube_style_hierarchies=tube_style_hierarchies, pois=pois,
+        regions=regions,
     )
     segments_geo_json = json.dumps(segments_geo)
 
@@ -1806,6 +1991,10 @@ def build_map(xlsx_path=DEFAULT_XLSX, title="Geographic Spine Map", tube_style_h
      toggled by JS adding/removing 'labels-visible' on #stage */
   .zoom-point-label {{ display:none; }}
   #stage.labels-visible .zoom-point-label {{ display:block; }}
+  /* brand badges (fuel + fast-food/coffee chains): a further zoom stage
+     past the point names above, toggled by 'badges-visible' on #stage */
+  .brand-badge {{ display:none; }}
+  #stage.badges-visible .brand-badge {{ display:block; }}
   /* bridge/tunnel names have their own 3-state toggle (off/on/on+length),
      independent of the zoom-based fuel-station names above */
   #stage.labels-visible.bridges-off .bridge-label {{ display:none; }}
@@ -1838,6 +2027,7 @@ def build_map(xlsx_path=DEFAULT_XLSX, title="Geographic Spine Map", tube_style_h
   const wrap = document.getElementById('wrap');
   const stage = document.getElementById('stage');
   const LABEL_ZOOM_THRESHOLD = 2.5;  // scale at which point names appear
+  const BADGE_ZOOM_THRESHOLD = {BADGE_ZOOM_THRESHOLD};  // scale at which brand badges appear
   const MAP_MAX_ZOOM = {MAP_MAX_ZOOM};
   let scale = 1, panX = 0, panY = 0;
   let dragging = false, lastX = 0, lastY = 0;
@@ -1855,6 +2045,7 @@ def build_map(xlsx_path=DEFAULT_XLSX, title="Geographic Spine Map", tube_style_h
 
   function updateLabelVisibility() {{
     stage.classList.toggle('labels-visible', scale >= LABEL_ZOOM_THRESHOLD);
+    stage.classList.toggle('badges-visible', scale >= BADGE_ZOOM_THRESHOLD);
   }}
 
   function apply() {{
@@ -2151,6 +2342,7 @@ def load_data(xlsx_path):
     points_by_edge = defaultdict(list)
     pts_header = [c.value for c in wb["Points"][1]]
     from_start_col = pts_header.index("OSM DistanceFromStart (km)") if "OSM DistanceFromStart (km)" in pts_header else None
+    food_brand_col = pts_header.index("Food brand(s)") if "Food brand(s)" in pts_header else None
     for row in wb["Points"].iter_rows(min_row=2, values_only=True):
         if not row[0] or not row[9]:
             continue
@@ -2163,6 +2355,7 @@ def load_data(xlsx_path):
             id=row[0], name=row[1], category=row[2], sides=row[5],
             lat=row[6], lon=row[7], edge_id=row[9], pos=row[10] or 0.5,
             order=row[11] or 0, brand=row[12], facilities=row[13], length_m=length_m,
+            food_brand=row[food_brand_col] if food_brand_col is not None else None,
             from_start_km=row[from_start_col] if from_start_col is not None else None,
         ))
     for eid in points_by_edge:
@@ -2563,6 +2756,7 @@ def fuel_side_visible(point, from_j, to_j):
 
 def render_graph(junctions, seg_by_pair, points_by_edge, node_x, node_lane, edges_drawn, source, target,
            orientation="vertical"):
+    map_icons.reset_icon_registry()  # this svg gets its own self-contained <defs>
     colours = assign_colours(edges_drawn, seg_by_pair)
 
     # primary = position along the route (hop index); secondary = branch offset (zig-zag lane)
@@ -2826,6 +3020,7 @@ def render_graph(junctions, seg_by_pair, points_by_edge, node_x, node_lane, edge
         f'<svg id="mapsvg" width="{width:.0f}" height="{height:.0f}" '
         f'viewBox="0 0 {width:.0f} {height:.0f}" xmlns="http://www.w3.org/2000/svg">'
         f'<rect width="100%" height="100%" fill="#fbfaf6"/>'
+        + map_icons.icon_defs_svg()
         + "".join(svg_lines) + "".join(svg_road_labels) + "".join(svg_points)
         + "".join(svg_nodes) + "".join(svg_labels) + "".join(svg_dists) + "".join(svg_fuel_legs)
         + "".join(svg_pois)
@@ -2857,11 +3052,21 @@ def _fuel_marker(x, y, pt, box, leader):
     label = _esc(pt["name"])
     brand = f' <tspan class="brand">[{_esc(pt["brand"])}]</tspan>' if pt.get("brand") else ""
     lx, ly, anchor = _label_pos(x, y, box)
+    # the fuel brand's real icon where we have one on file, else a
+    # brand-coloured square (falls back to neutral orange for an unknown
+    # brand) - echoing the map tab's badges, one icon per station here
+    icon_id, fill = map_icons.primary_fuel_icon(pt.get("brand"))
+    half = GRAPH_FUEL_HALF
+    if icon_id:
+        marker_svg = (f'<rect x="{-half}" y="{-half}" width="{2*half}" height="{2*half}" '
+                      f'fill="white" stroke="#7a4400" stroke-width="1"/>'
+                      + map_icons.use_icon_svg(icon_id, -half*0.85, -half*0.85, half*1.7, half*1.7))
+    else:
+        marker_svg = (f'<rect x="{-half}" y="{-half}" width="{2*half}" height="{2*half}" '
+                      f'fill="{fill}" stroke="#7a4400" stroke-width="1"/>')
     return (
         f'<g class="fuel-marker" transform="translate({x:.1f} {y:.1f})">'
-        + _leader(x, y, box, leader) +
-        f'<rect x="{-GRAPH_FUEL_HALF}" y="{-GRAPH_FUEL_HALF}" width="{2 * GRAPH_FUEL_HALF}" '
-        f'height="{2 * GRAPH_FUEL_HALF}" fill="#E8871E" stroke="#7a4400" stroke-width="1"/>'
+        + _leader(x, y, box, leader) + marker_svg +
         f'<text class="fuel-label zoom-label" x="{lx:.1f}" y="{ly:.1f}" text-anchor="{anchor}">{label}{brand}</text>'
         f'</g>'
     )

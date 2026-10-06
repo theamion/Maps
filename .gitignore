@@ -1,3 +1,5 @@
-# workbooks (data) and OSM caches stay local
+# workbooks (data) and OSM/serways caches stay local
 *.xlsx
 osm_*_cache.json
+serways_cache.json
+__pycache__/
