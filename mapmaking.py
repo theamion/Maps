@@ -832,6 +832,15 @@ def light_relaxation_pass(pos, junctions, connected_pairs, min_dist=0.35, snap=0
 
 # ------------------------------------------------------------- polylines ---
 
+# the actual London Underground map convention, and the default: a
+# tube-style elbow may only use multiples of 45 degrees, nothing in between
+TUBE_ANGLES_STRICT = [0, 45, 90, 135, 180, 225, 270, 315]
+# a looser 16-angle set - every 30 degrees, plus the 4 diagonals
+# (45/135/225/315) for a tighter-fitting bend right around them - picked
+# with --tube-relaxed instead
+TUBE_ANGLES_RELAXED = [0, 30, 45, 60, 90, 120, 135, 150, 180, 210, 225, 240, 270, 300, 315, 330]
+
+
 def build_road_polylines(junctions, segments, pos, roads, tube_style_hierarchies=None, angles_deg=None):
     """Straight line between each segment's two (already spine-adjusted)
     junction positions by default - bends come entirely from junction
@@ -843,9 +852,10 @@ def build_road_polylines(junctions, segments, pos, roads, tube_style_hierarchies
     London-Underground-style angle snapping (an elbow bend onto the two
     nearest allowed angles) - Connector and Local roads always stay as
     direct lines regardless, since they're meant to read as flexible local
-    links, not schematic corridors."""
+    links, not schematic corridors. `angles_deg` picks which angles are
+    allowed - TUBE_ANGLES_STRICT (default) or TUBE_ANGLES_RELAXED."""
     tube_style_hierarchies = tube_style_hierarchies or set()
-    angles_deg = angles_deg or [0, 30, 45, 60, 90, 120, 135, 150, 180, 210, 225, 240, 270, 300, 315, 330]
+    angles_deg = angles_deg or TUBE_ANGLES_STRICT
     angle_units = {a: (math.cos(math.radians(a)), math.sin(math.radians(a))) for a in sorted(set(angles_deg))}
     angle_list = sorted(angle_units)
 
@@ -1748,7 +1758,7 @@ def build_legend_html():
 
 def render_map(junctions, segments, pos, roads, points, border_data, border_node_pos,
                 river_data=None, ambiguous_crossings=None, tube_style_hierarchies=None, pois=None,
-                regions=None):
+                regions=None, tube_angles=None):
     """Assembles the SVG following the render order in spec section 16:
     background, borders, rivers, local -> connector -> secondary -> primary
     roads, road points, normal junctions/exits, border crossings,
@@ -1768,7 +1778,8 @@ def render_map(junctions, segments, pos, roads, points, border_data, border_node
     height = (maxy-miny) * CANVAS_SCALE
 
     road_colours = assign_road_colours(segments, PALETTE, pos=pos, X=X, Y=Y)
-    polylines = build_road_polylines(junctions, segments, pos, roads, tube_style_hierarchies=tube_style_hierarchies)
+    polylines = build_road_polylines(junctions, segments, pos, roads,
+                                     tube_style_hierarchies=tube_style_hierarchies, angles_deg=tube_angles)
     polylines = resolve_road_crossings(segments, polylines, roads)
     road_labels = assign_road_labels(segments, polylines, X, Y)
 
@@ -2223,7 +2234,7 @@ def render_map(junctions, segments, pos, roads, points, border_data, border_node
 
 # ------------------------------------------------------------- generate ---
 
-def build_map(xlsx_path=DEFAULT_XLSX, title="Geographic Spine Map", tube_style_hierarchies=None):
+def build_map(xlsx_path=DEFAULT_XLSX, title="Geographic Spine Map", tube_style_hierarchies=None, tube_angles=None):
     """Builds the geography-preserving map page. Returns (html, stats)."""
     if tube_style_hierarchies is None:
         tube_style_hierarchies = {'Primary', 'Secondary'}  # tube-style is now the default
@@ -2292,7 +2303,7 @@ def build_map(xlsx_path=DEFAULT_XLSX, title="Geographic Spine Map", tube_style_h
         junctions, segments, pos, roads, points, border_data or {}, border_node_pos,
         river_data={'segments': river_segs, 'pos': river_pos} if river_segs else None,
         ambiguous_crossings=ambiguous, tube_style_hierarchies=tube_style_hierarchies, pois=pois,
-        regions=regions,
+        regions=regions, tube_angles=tube_angles,
     )
     segments_geo_json = json.dumps(segments_geo)
     legend_html = build_legend_html()
@@ -3732,6 +3743,10 @@ def main():
                     help='disable London-Underground-style angle snapping for Primary roads (on by default)')
     mg.add_argument('--no-tube-secondary', action='store_true',
                     help='disable London-Underground-style angle snapping for Secondary roads (on by default)')
+    mg.add_argument('--tube-relaxed', action='store_true',
+                    help='allow a looser 16-angle set (TUBE_ANGLES_RELAXED: every 30 degrees, plus the diagonals) '
+                         'for tube-style bends, instead of the default strict London Underground convention '
+                         '(TUBE_ANGLES_STRICT: only multiples of 45 degrees)')
 
     rg = ap.add_argument_group('route tabs',
                                'without --to/--via/--branch/--route-title every route in ROUTE_TABS gets a tab; '
@@ -3762,7 +3777,8 @@ def main():
         tube_style.add('Primary')
     if not args.no_tube_secondary:
         tube_style.add('Secondary')
-    map_html, map_stats = build_map(xlsx_path=args.xlsx, title=args.map_title,
+    tube_angles = TUBE_ANGLES_RELAXED if args.tube_relaxed else None
+    map_html, map_stats = build_map(xlsx_path=args.xlsx, title=args.map_title, tube_angles=tube_angles,
                                     tube_style_hierarchies=tube_style)
 
     if args.end_name or args.via or args.branch is not None or args.route_title:

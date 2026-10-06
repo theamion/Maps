@@ -122,6 +122,7 @@ seconds per route tab.
 | `--map-title` | `Geographic Spine Map` | Page title |
 | `--no-tube-primary` | off | Disable London-Underground-style angle snapping for Primary roads |
 | `--no-tube-secondary` | off | Disable angle snapping for Secondary roads |
+| `--tube-relaxed` | off | Allow a looser 16-angle set for tube-style bends (every 30°, plus the diagonals) instead of the strict Underground convention (multiples of 45° only) |
 | **Route tab** | | |
 | `--from` / `--to` | `Vught` / `ROUTE_TABS` | Start and end junction names |
 | `--via` | none | Comma-separated junctions the main route must pass, in order |
