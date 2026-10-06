@@ -74,8 +74,8 @@ Builds one HTML page with a map tab and one tab per route in `ROUTE_TABS`:
 - **Kaart:** the whole network as a schematic map that stays close to real
   geography. It has zoom, a GPS button, and toggles for bridge names (B),
   distances (Km), points of interest (★) and debug IDs (D).
-- **Route tabs:** currently Vught → Berwang, and Vught → Serfaus via Lindau.
-  Each shows the route between two places as a "metro board" diagram, like the
+- **Route tabs:** currently Vught → Berwang, Vught → Serfaus via Lindau, and
+  the reverse of each. Each shows the route between two places as a "metro board" diagram, like the
   line diagrams on NS departure boards. The main route runs straight, and
   alternative branches fan out and rejoin it. Positions are ordinal hops, not
   geography. Buttons toggle fuel stations, bridges and tunnels (off, on, or on
@@ -98,12 +98,15 @@ Open `holidays.html` in a browser. Adding `#route` to the address opens the
 first route tab directly, `#route2` the second, and so on.
 
 The route tabs are defined in `ROUTE_TABS` at the top of `mapmaking.py`. Each
-entry has a destination (`to`), optionally junctions the main route must pass
-in order (`via`), and optionally its own fixed branches (`branches`, default
-`DEFAULT_BRANCHES`). The Serfaus tab adds the route via Füssen and the Fernpass
-as a fixed branch. It's the shortest way to Serfaus, but because it never
-passes Lindau, the automatic search would never find it. Add a line to
-`ROUTE_TABS` for another destination.
+entry has a destination (`to`), optionally its own start (`from`, default
+`DEFAULT_FROM`/`--from` - written as a plain dict literal rather than
+`dict(...)`, since `from` can't be a keyword argument), optionally junctions
+the main route must pass in order (`via`), and optionally its own fixed
+branches (`branches`, default `DEFAULT_BRANCHES`). The Serfaus tabs add the
+route via Füssen and the Fernpass as a fixed branch (`SERFAUS_BRANCHES`).
+It's the shortest way to/from Serfaus, but because it never passes Lindau,
+the automatic search would never find it. Add a line to `ROUTE_TABS` for
+another destination (or another reverse pair).
 
 Passing `--to`, `--via`, `--branch` or `--route-title` replaces `ROUTE_TABS`
 with a single tab for just that route. The other route options (`--from`,

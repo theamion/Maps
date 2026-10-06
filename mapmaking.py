@@ -32,7 +32,7 @@ import json
 import math
 import os
 import re
-from collections import defaultdict
+from collections import Counter, defaultdict
 
 import networkx as nx
 from openpyxl import load_workbook
@@ -1060,26 +1060,151 @@ def assign_road_labels(segments, polylines, X, Y, clearance=MAP_ROAD_LABEL_CLEAR
     return chosen
 
 
-def assign_road_colours(segments, palette):
-    """Every road gets its own colour, full stop - no two roads share one
-    unless there are literally more roads than usable palette entries
-    (unlikely: the palette has ~87, this network has ~60). Simpler and
-    strictly better than the old 'different colour only if two roads touch
-    or run close together' scheme: that was a deliberate compromise from
-    when the palette was too small (33) to give everyone a unique colour,
-    but with headroom to spare there's no reason two unrelated roads should
-    ever match, regardless of whether they're near each other on the map."""
+def _srgb_to_linear(c):
+    c = c / 255.0
+    return c / 12.92 if c <= 0.04045 else ((c + 0.055) / 1.055) ** 2.4
+
+
+def hex_to_lab(hexcolor):
+    """sRGB hex -> CIE Lab (D65), so colour differences can be measured the
+    way they actually look, not just as raw hex/RGB numbers - two colours
+    with a big ΔE76 read as different at a glance; a small one doesn't,
+    even if their hex codes aren't close."""
+    h = hexcolor.lstrip('#')
+    r, g, b = (_srgb_to_linear(int(h[i:i+2], 16)) for i in (0, 2, 4))
+    x = r*0.4124564 + g*0.3575761 + b*0.1804375
+    y = r*0.2126729 + g*0.7151522 + b*0.0721750
+    z = r*0.0193339 + g*0.1191920 + b*0.9503041
+    xn, yn, zn = 0.95047, 1.0, 1.08883
+    x, y, z = x/xn, y/yn, z/zn
+
+    def f(t):
+        return t ** (1/3) if t > 0.008856 else (7.787*t + 16/116)
+
+    fx, fy, fz = f(x), f(y), f(z)
+    return (116*fy - 16, 500*(fx - fy), 200*(fy - fz))
+
+
+def lab_distance(lab1, lab2):
+    return math.sqrt(sum((p - q) ** 2 for p, q in zip(lab1, lab2)))
+
+
+def road_importance(segments):
+    """A road's weight for the colour solver below: longer and/or more
+    fragmented roads (more segments) matter more, on a log scale so one
+    400km motorway doesn't dwarf everything else outright."""
+    length, count = defaultdict(float), defaultdict(int)
+    for seg in segments:
+        key = road_key(seg['road'])
+        length[key] += seg.get('dist_km') or 0
+        count[key] += 1
+    return {k: math.log1p(length[k]) + 0.4 * math.log1p(count[k]) for k in length}
+
+
+ROAD_COLOUR_NEAR_PX = 1800.0  # map: beyond this screen distance, two roads have no colour constraint at all
+
+
+def assign_road_colours(segments, palette, pos=None, X=None, Y=None, base_separation=26.0):
+    """Gives every road a colour via a real solver, not a fixed list walk:
+
+    - How much two roads' colours must differ is continuous, not a yes/no
+      "do they touch" check: 0 (no constraint - free to match) once their
+      closest junctions are more than ROAD_COLOUR_NEAR_PX apart on the
+      actual rendered map, rising smoothly as they get closer, maxing out
+      when they literally cross (share a junction). Two genuinely distant,
+      unrelated roads can still end up sharing a colour - a long one and a
+      short one that merely happen to both cross a third road can't.
+    - The required separation also scales up with how important the more
+      significant of the two roads is (road_importance: total length +
+      segment count): a clash matters far more between two long motorways
+      than on a short connector crossing one of them.
+    - Separation is measured as CIE Lab distance (hex_to_lab/lab_distance),
+      a perceptual measure, not raw hex/RGB difference - two colours can
+      look equally "different" by that measure despite very different hex
+      codes, or look alike despite different hex codes.
+    - Each road (longest/most important first) first tries to *reuse* an
+      already-assigned colour - whichever already-used one satisfies every
+      constraint it has, preferring the most-reused such colour, which
+      keeps the total palette small wherever the network allows it - and
+      only reaches for a fresh palette entry if no reuse satisfies them
+      all. The two reserved colours (PINNED_COLOURS, local roads) are
+      never handed out this way - they stay meaningful."""
     road_keys = {road_key(seg['road']) for seg in segments}
+    road_junctions = defaultdict(set)
+    for seg in segments:
+        road_junctions[road_key(seg['road'])].update([seg['from'], seg['to']])
+
+    imp = road_importance(segments)
+    imp_values = list(imp.values()) or [0.0]
+    imp_lo, imp_hi = min(imp_values), max(imp_values)
+
+    def norm_imp(k):
+        if imp_hi <= imp_lo:
+            return 0.5
+        return (imp.get(k, 0.0) - imp_lo) / (imp_hi - imp_lo)
+
+    # closest screen distance between any junction of road a and any of
+    # road b (0.0 if they share one outright)
+    screen_pts = {}
+    if pos and X and Y:
+        screen_pts = {k: [(X(pos[j][0]), Y(pos[j][1])) for j in js if j in pos]
+                      for k, js in road_junctions.items()}
+
+    def min_gap(a, b):
+        if road_junctions[a] & road_junctions[b]:
+            return 0.0
+        pa, pb = screen_pts.get(a), screen_pts.get(b)
+        if not pa or not pb:
+            return ROAD_COLOUR_NEAR_PX  # unknown position - treat as borderline, not unconstrained
+        return min(math.hypot(ax - bx, ay - by) for ax, ay in pa for bx, by in pb)
+
+    def required_sep(a, b):
+        gap = min_gap(a, b)
+        if gap >= ROAD_COLOUR_NEAR_PX:
+            return 0.0
+        closeness = 1.0 - gap / ROAD_COLOUR_NEAR_PX
+        scale = 0.65 + 0.9 * max(norm_imp(a), norm_imp(b))
+        return base_separation * scale * closeness
+
     colours = {}
     for key, colour in PINNED_COLOURS.items():
         if key in road_keys:
             colours[key] = colour
     if 'LOKALE_WEG' in road_keys:
         colours['LOKALE_WEG'] = LOCAL_ROAD_COLOUR
+    reserved_colours = set(colours.values())
+
+    lab_cache = {}
+
+    def lab_of(c):
+        if c not in lab_cache:
+            lab_cache[c] = hex_to_lab(c)
+        return lab_cache[c]
+
     usable = [c for c in palette if c != NAVY_BLUE]
-    remaining = sorted(k for k in road_keys if k not in colours)
-    for i, key in enumerate(remaining):
-        colours[key] = usable[i % len(usable)]
+    order = sorted((k for k in road_keys if k not in colours), key=lambda k: -imp.get(k, 0.0))
+
+    for key in order:
+        constraints = [(colours[n], r) for n in colours if n != key
+                       for r in [required_sep(key, n)] if r > 0]
+
+        chosen = None
+        used_counts = Counter(c for k2, c in colours.items() if c not in reserved_colours)
+        if used_counts:
+            for c, _n in used_counts.most_common():
+                if all(lab_distance(lab_of(c), lab_of(nc)) >= req for nc, req in constraints):
+                    chosen = c
+                    break
+
+        if chosen is None:
+            best_margin = None
+            for c in usable:
+                margin = min((lab_distance(lab_of(c), lab_of(nc)) - req for nc, req in constraints),
+                            default=1e9)
+                if best_margin is None or margin > best_margin:
+                    best_margin, chosen = margin, c
+
+        colours[key] = chosen
     return colours
 
 
@@ -1642,7 +1767,7 @@ def render_map(junctions, segments, pos, roads, points, border_data, border_node
     width = (maxx-minx) * CANVAS_SCALE
     height = (maxy-miny) * CANVAS_SCALE
 
-    road_colours = assign_road_colours(segments, PALETTE)
+    road_colours = assign_road_colours(segments, PALETTE, pos=pos, X=X, Y=Y)
     polylines = build_road_polylines(junctions, segments, pos, roads, tube_style_hierarchies=tube_style_hierarchies)
     polylines = resolve_road_crossings(segments, polylines, roads)
     road_labels = assign_road_labels(segments, polylines, X, Y)
@@ -2469,15 +2594,22 @@ DEFAULT_BRANCHES = [
     ["Kerpen", "Köln-West", "Frankfurter Kreuz", "Biebelried", "Feuchtwangen/Crailsheim", "Ulm/Elchingen"],  # A3/A7
     ["Weinsberg", "Leonberg"],  # A81
 ]
-# one tab per route in holidays.html, after the map. to: destination; via: junctions the
-# main route must pass, in order; branches: fixed branches (default DEFAULT_BRANCHES).
-# Junction names may be partial ("Lindau" finds "Lindau-Hörbranz").
+# one tab per route in holidays.html, after the map. from: start (default
+# DEFAULT_FROM - "from" can't be a keyword argument, so these use dict
+# literals instead of dict(...) wherever they override it); to: destination;
+# via: junctions the main route must pass, in order; branches: fixed
+# branches (default DEFAULT_BRANCHES). Junction names may be partial
+# ("Lindau" finds "Lindau-Hörbranz").
+SERFAUS_VIA = ["Lindau"]
+# the shortest way between Vught and Serfaus is via Füssen and the Fernpass,
+# which never passes Lindau - so it would never show up as an automatic
+# branch, in either direction
+SERFAUS_BRANCHES = DEFAULT_BRANCHES + [["Memmingen", "Grenztunnel Füssen", "Fernpass", "Zams-Landeck Ost"]]
 ROUTE_TABS = [
     dict(to="Berwang"),
-    dict(to="Serfaus", via=["Lindau"],
-         # the shortest way to Serfaus is via Füssen and the Fernpass, which never
-         # passes Lindau - so it would never show up as an automatic branch
-         branches=DEFAULT_BRANCHES + [["Memmingen", "Grenztunnel Füssen", "Fernpass", "Zams-Landeck Ost"]]),
+    dict(to="Serfaus", via=SERFAUS_VIA, branches=SERFAUS_BRANCHES),
+    {"from": "Berwang", "to": "Vught"},
+    {"from": "Serfaus", "to": "Vught", "via": SERFAUS_VIA, "branches": SERFAUS_BRANCHES},
 ]
 
 HIERARCHY_WIDTH = {"Primary": 5.0, "Secondary": 4.0, "Connector": 3.0, "Local": 2.2}
@@ -3645,7 +3777,7 @@ def main():
     for tab in tabs:
         branches = [] if args.no_default_branches else tab.get('branches')
         graph_html, graph_stats = build_graph_page(
-            args.xlsx, args.start_name, tab['to'], args.margin, tab.get('title'),
+            args.xlsx, tab.get('from', args.start_name), tab['to'], args.margin, tab.get('title'),
             args.branches_per_leg, args.min_novel_km, tab.get('via') or [], args.orientation, branches)
         routes.append((graph_stats['title'], graph_html))
         route_stats.append(graph_stats)
