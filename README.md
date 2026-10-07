@@ -316,6 +316,21 @@ on the Ekkersweijer->Paalgraven (A50) segment, and `W`/`N` on the two A2
 segments, makes the three roads fan out from Ekkersweijer the way they're
 meant to be read, independent of their raw geographic bearing.
 
+### Route diagrams reuse the Kaart's colour solver
+
+`render_graph()` (the per-route pages, not the Kaart) used to pick colours
+by cycling through a fixed 14-entry `ROAD_PALETTE` in first-seen order - a
+route with more than 14 distinct roads (easily reached once branches are
+included) would silently reuse a colour for an unrelated road (e.g. A3 and
+A44 both landing on the same slot), making them look like the same line
+where they crossed. It now builds the same synthetic segment list the Kaart's own colour
+solver, `assign_road_colours()`, expects (reuse-first, CIE Lab-distance
+constraints scaled by screen proximity and road importance - see its
+docstring), keyed by the route diagram's own schematic node positions
+instead of geographic ones, and reuses the same 87-colour `PALETTE` - so it
+gets the same collision-aware assignment, including the `PINNED_COLOURS`
+navy for A2/A61/A7.
+
 ### Labels for bridges, tunnels and fuel stations
 
 In both tabs these labels never overlap each other, junction names or markers,

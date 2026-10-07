@@ -2771,13 +2771,6 @@ MARGIN_PX = 100   # extra room around the route canvas, so the floating
                   # controls panel has blank space to sit over even when
                   # zoomed in near an edge, instead of overlapping the route
 
-ROAD_PALETTE = [
-    "#1B3A6B", "#C0392B", "#1E8449", "#B9770E", "#6C3483", "#117864",
-    "#A93226", "#2471A3", "#B7950B", "#7D3C98", "#229954", "#CA6F1E",
-    "#2E86C1", "#943126",
-]
-
-
 # --------------------------------------------------------------------------
 # Data loading
 # --------------------------------------------------------------------------
@@ -3224,21 +3217,6 @@ def count_crossings(node_x, node_lane, edges):
 # Rendering
 # --------------------------------------------------------------------------
 
-def assign_colours(edges_drawn, seg_by_pair):
-    colours = {}
-    palette_i = 0
-    order = []
-    for key in edges_drawn:
-        u, v = edges_drawn[key]
-        seg = seg_by_pair.get(key)
-        canon = seg["canonical"] if seg else "?"
-        if canon not in colours:
-            colours[canon] = ROAD_PALETTE[palette_i % len(ROAD_PALETTE)]
-            palette_i += 1
-            order.append(canon)
-    return colours
-
-
 def fuel_side_visible(point, from_j, to_j):
     """Direction-aware visibility for one-sided fuel stations: only show a
     one-sided station if it lies on the right-hand side of the direction
@@ -3260,7 +3238,6 @@ def fuel_side_visible(point, from_j, to_j):
 def render_graph(junctions, seg_by_pair, points_by_edge, node_x, node_lane, edges_drawn, source, target,
            orientation="vertical"):
     map_icons.reset_icon_registry()  # this svg gets its own self-contained <defs>
-    colours = assign_colours(edges_drawn, seg_by_pair)
 
     # primary = position along the route (hop index); secondary = branch offset (zig-zag lane)
     primary = {n: node_x[n] for n in node_x}
@@ -3287,6 +3264,19 @@ def render_graph(junctions, seg_by_pair, points_by_edge, node_x, node_lane, edge
 
         width = MARGIN_PX * 2 + (max_p - min_p) * STEP_X + 300
         height = MARGIN_PX * 2 + 60 + (max_s - min_s) * LANE_HEIGHT
+
+    # same perceptual colour solver as the Kaart view (reuse-first, Lab-distance
+    # constraints scaled by screen proximity + importance) instead of a plain
+    # palette-cycle - a route diagram can easily show more distinct roads than
+    # a small fixed palette has entries for, which used to produce silent
+    # colour collisions between unrelated roads (e.g. A3 and A44 both landing
+    # on the same palette slot by coincidence)
+    colour_segs = [{'road': seg_by_pair[key]["road"] if seg_by_pair.get(key) else "?",
+                     'from': u, 'to': v,
+                     'dist_km': seg_by_pair[key]["distance_km"] if seg_by_pair.get(key) else 0}
+                   for key, (u, v) in edges_drawn.items()]
+    colour_pos = {n: (px(n), py(n)) for n in node_x}
+    colours = assign_road_colours(colour_segs, PALETTE, pos=colour_pos, X=lambda v: v, Y=lambda v: v)
 
     # which canonical road "arrives" at each node, to detect where a road-number label is needed
     incoming_canonical = {}
