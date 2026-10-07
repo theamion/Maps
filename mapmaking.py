@@ -3317,7 +3317,18 @@ def rebase_wide_runs(runs, run_parent, run_rejoin, node_x, node_lane, edges_draw
     one linear trip, so the destination has to stay the lowest point on
     it. Since a rebased run always moves to fresh space past the current
     max, it's pushed past the destination too; whenever that happens, the
-    destination is pushed out further still, so it's never overtaken."""
+    destination is pushed out further still, so it's never overtaken.
+
+    A run can be long (a leg alternate that rediscovers most of the main
+    route, e.g. Köln-Ost...Paalgraven on the way back from an away branch)
+    while only a short stretch well past its attach point is what actually
+    crosses anything - the first few interior nodes sit perfectly fine
+    right next to their attach junction. Moving the WHOLE run would drag
+    that innocent prefix across the diagram for no reason (e.g. Köln-Ost
+    ending up nowhere near Köln-Heumar even though nothing about that pair
+    was ever in conflict). So only the suffix starting at the first node
+    of the run that's actually party to a crossing gets pushed; the prefix
+    keeps its original, already-fine interpolated position."""
     edges = list(edges_drawn.values())
     node_to_run = {n: run for run in runs for n in run}
 
@@ -3336,8 +3347,9 @@ def rebase_wide_runs(runs, run_parent, run_rejoin, node_x, node_lane, edges_draw
         # it's actually crossing - pushing just past THAT is usually enough,
         # and far cheaper (a much shorter diagram) than the global max,
         # which is only needed as a fallback when the local push isn't
-        # enough to clear every conflict
-        implicated, seen, local_max = [], set(), {}
+        # enough to clear every conflict; and the earliest-implicated node
+        # within the run, so only the genuinely-conflicting suffix moves
+        implicated, seen, local_max, first_bad_idx = [], set(), {}, {}
         for (e1, e2) in pairs:
             for this_e, other_e in ((e1, e2), (e2, e1)):
                 for node in this_e:
@@ -3346,6 +3358,8 @@ def rebase_wide_runs(runs, run_parent, run_rejoin, node_x, node_lane, edges_draw
                         continue
                     far = max(node_x[n] for n in other_e)
                     local_max[id(run)] = max(local_max.get(id(run), far), far)
+                    idx = run.index(node)
+                    first_bad_idx[id(run)] = min(first_bad_idx.get(id(run), idx), idx)
                     if id(run) not in seen:
                         seen.add(id(run))
                         implicated.append(run)
@@ -3354,6 +3368,10 @@ def rebase_wide_runs(runs, run_parent, run_rejoin, node_x, node_lane, edges_draw
         improved = False
         for run in implicated:
             if run_parent.get(run[0]) is None or run_rejoin.get(run[0]) is None:
+                continue
+            split = first_bad_idx.get(id(run), 0)
+            suffix = run[split:]
+            if not suffix:
                 continue
             saved_x = {n: node_x[n] for n in run}
             if destination is not None:
@@ -3370,10 +3388,10 @@ def rebase_wide_runs(runs, run_parent, run_rejoin, node_x, node_lane, edges_draw
 
             moved = False
             for new_start in targets:
-                for k, node in enumerate(run, start=1):
+                for k, node in enumerate(suffix, start=1):
                     node_x[node] = new_start + k
                 if destination is not None:
-                    run_end = new_start + len(run)
+                    run_end = new_start + len(suffix)
                     if node_x[destination] <= run_end:
                         node_x[destination] = run_end + 1.0
 
