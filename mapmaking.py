@@ -3135,6 +3135,7 @@ def layout_routes(accepted):
     untangle_lanes(runs, node_x, node_lane, edges_drawn)
     enforce_nesting(runs, run_parent, node_x, node_lane, edges_drawn)
     rebase_wide_runs(runs, run_parent, run_rejoin, node_x, node_lane, edges_drawn, destination=main_path[-1])
+    compact_x_gaps(node_x)
     return node_x, node_lane, edges_drawn
 
 
@@ -3335,6 +3336,30 @@ def rebase_wide_runs(runs, run_parent, run_rejoin, node_x, node_lane, edges_draw
                 break  # positions shifted - re-derive which edges still cross
         if not improved:
             break
+
+
+def compact_x_gaps(node_x, min_gap=1.0):
+    """rebase_wide_runs (and pushing the destination out to stay last) can
+    leave the diagram longer than it needs to be: a run moved past the old
+    far edge leaves its old hop-range empty, and the destination's own push
+    can open a gap nothing else ever fills. Crossing-freeness only depends
+    on each edge's x-interval order and overlap relative to the others,
+    never on the absolute x values - so closing an unused gap down to the
+    normal one-hop spacing, by shifting everything past it back by the
+    difference, can't change what crosses what. It can only make the
+    diagram shorter."""
+    xs = sorted(set(node_x.values()))
+    if len(xs) < 2:
+        return
+    shift = 0.0
+    remap = {xs[0]: xs[0]}
+    for prev, x in zip(xs, xs[1:]):
+        gap = x - prev
+        if gap > min_gap:
+            shift += gap - min_gap
+        remap[x] = x - shift
+    for n in node_x:
+        node_x[n] = remap[node_x[n]]
 
 
 def count_crossings(node_x, node_lane, edges, trunk_weight=1, return_pairs=False):
