@@ -3134,7 +3134,7 @@ def layout_routes(accepted):
 
     untangle_lanes(runs, node_x, node_lane, edges_drawn)
     enforce_nesting(runs, run_parent, node_x, node_lane, edges_drawn)
-    rebase_wide_runs(runs, run_parent, run_rejoin, node_x, node_lane, edges_drawn)
+    rebase_wide_runs(runs, run_parent, run_rejoin, node_x, node_lane, edges_drawn, destination=main_path[-1])
     return node_x, node_lane, edges_drawn
 
 
@@ -3252,7 +3252,7 @@ def enforce_nesting(runs, run_parent, node_x, node_lane, edges_drawn, passes=6):
             break
 
 
-def rebase_wide_runs(runs, run_parent, run_rejoin, node_x, node_lane, edges_drawn, passes=3):
+def rebase_wide_runs(runs, run_parent, run_rejoin, node_x, node_lane, edges_drawn, destination=None, passes=3):
     """Even with a correct nesting invariant, no side/depth assignment can
     make the diagram fully crossing-free if its x-order itself is
     contradictory: treating "does edge A's hop-range properly interleave
@@ -3274,7 +3274,14 @@ def rebase_wide_runs(runs, run_parent, run_rejoin, node_x, node_lane, edges_draw
     would be far too slow), shortest first, keeping a move only if
     re-picking lanes for the new layout actually reduces real crossings -
     so this can never make things worse, only trade an unsolvable lane
-    problem for a slightly wider diagram."""
+    problem for a slightly wider diagram.
+
+    `destination` (the route's own endpoint) must stay the single highest
+    x in the whole diagram throughout - the page reads top to bottom as
+    one linear trip, so the destination has to stay the lowest point on
+    it. Since a rebased run always moves to fresh space past the current
+    max, it's pushed past the destination too; whenever that happens, the
+    destination is pushed out further still, so it's never overtaken."""
     edges = list(edges_drawn.values())
     node_to_run = {n: run for run in runs for n in run}
 
@@ -3303,11 +3310,17 @@ def rebase_wide_runs(runs, run_parent, run_rejoin, node_x, node_lane, edges_draw
             if run_parent.get(run[0]) is None or run_rejoin.get(run[0]) is None:
                 continue
             saved_x = {n: node_x[n] for n in run}
+            if destination is not None:
+                saved_x[destination] = node_x[destination]
             saved_lane = dict(node_lane)
 
             new_start = max(node_x.values()) + 1.0
             for k, node in enumerate(run, start=1):
                 node_x[node] = new_start + k
+            if destination is not None:
+                run_end = new_start + len(run)
+                if node_x[destination] <= run_end:
+                    node_x[destination] = run_end + 1.0
 
             untangle_lanes(runs, node_x, node_lane, edges_drawn)
             enforce_nesting(runs, run_parent, node_x, node_lane, edges_drawn)
