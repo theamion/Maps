@@ -3055,6 +3055,7 @@ def layout_routes(accepted):
     edges_drawn = {}          # frozenset({u,v}) -> (u, v) in the order first drawn
     # side_intervals[side][depth] = list of (x_min, x_max) already used at that depth
     side_intervals = {1: defaultdict(list), -1: defaultdict(list)}
+    run_parent = {}           # run's first interior node -> the junction it attached to
     GAP = 0.35
 
     main_path = accepted[0][0]
@@ -3122,12 +3123,15 @@ def layout_routes(accepted):
                 node_x[path[k]] = x_attach + frac * (x_rejoin - x_attach)
                 node_lane[path[k]] = offset
             if rejoin_idx > attach_idx + 1:
-                runs.append(path[attach_idx + 1:rejoin_idx])
+                run = path[attach_idx + 1:rejoin_idx]
+                runs.append(run)
+                run_parent[run[0]] = path[attach_idx]
             for k in range(attach_idx, rejoin_idx):
                 edges_drawn[frozenset((path[k], path[k + 1]))] = (path[k], path[k + 1])
             i = rejoin_idx
 
     untangle_lanes(runs, node_x, node_lane, edges_drawn)
+    enforce_nesting(runs, run_parent, node_x, node_lane, edges_drawn)
     return node_x, node_lane, edges_drawn
 
 
@@ -3180,9 +3184,79 @@ def untangle_lanes(runs, node_x, node_lane, edges_drawn, passes=6):
     return count_crossings(node_x, node_lane, edges)
 
 
-def count_crossings(node_x, node_lane, edges):
+def enforce_nesting(runs, run_parent, node_x, node_lane, edges_drawn, passes=6):
+    """untangle_lanes moves each run independently to cut crossings, but a
+    run that attached to a junction on ANOTHER run (forced onto that
+    parent's side, at a strictly greater depth - see layout_routes) can
+    end up with an invalid nesting once that parent run itself gets moved
+    to a new lane: the child's side/depth is only checked against its
+    parent once, at creation time, never re-validated afterward. Once that
+    happens, the edge directly connecting the two runs (the plain
+    edges_drawn chord between a parent node and the child's attach point)
+    can cross the trunk or another branch with nothing registering it as
+    wrong, since neither run individually looks mis-placed.
+
+    This re-validates every run's side/depth against its parent's CURRENT
+    lane and, where it no longer holds, re-picks the best still-valid lane
+    (same side as the parent, strictly deeper) by the same crossings-first
+    search as untangle_lanes - repeated since fixing one run can change
+    what its own children need."""
+    edges = list(edges_drawn.values())
+
+    def cost():
+        return count_crossings(node_x, node_lane, edges, trunk_weight=5)
+
+    for _ in range(passes):
+        changed = False
+        for run in runs:
+            parent = run_parent.get(run[0])
+            if parent is None:
+                continue
+            parent_lane = node_lane[parent]
+            if parent_lane == 0:
+                continue  # attached to the trunk - either side is valid
+            required_side = 1 if parent_lane > 0 else -1
+            required_min_depth = abs(parent_lane) + 1
+            current = node_lane[run[0]]
+            current_side = 1 if current > 0 else (-1 if current < 0 else 0)
+            if current_side == required_side and abs(current) >= required_min_depth:
+                continue  # still a valid nesting
+
+            current_cost = cost()
+            best_lane, best_cost = None, None
+            for lane in LANE_CHOICES:
+                side = 1 if lane > 0 else -1
+                if side != required_side or abs(lane) < required_min_depth:
+                    continue
+                for n in run:
+                    node_lane[n] = lane
+                c = cost()
+                if best_cost is None or c < best_cost:
+                    best_cost, best_lane = c, lane
+            # only actually move it if a validly-nested lane isn't a worse
+            # trade than leaving this one run's nesting invalid - fixing one
+            # trunk crossing by scattering a long run across several others
+            # is not an improvement
+            if best_lane is not None and best_cost <= current_cost:
+                for n in run:
+                    node_lane[n] = best_lane
+                if best_lane != current:
+                    changed = True
+            else:
+                for n in run:
+                    node_lane[n] = current
+        if not changed:
+            break
+
+
+def count_crossings(node_x, node_lane, edges, trunk_weight=1):
     """Pairs of drawn edges that cross, or run on top of each other, anywhere
-    other than at a junction they share."""
+    other than at a junction they share. `trunk_weight` counts a crossing
+    that touches the trunk (lane 0 - the thick Primary line everything else
+    reads off of) that many times as heavily as an ordinary branch-vs-branch
+    crossing, which is far less visually jarring; left at 1 (plain count)
+    for untangle_lanes' own search, raised for enforce_nesting's, where the
+    fix for one crossing can otherwise trade it for several lesser ones."""
     pts = {n: (node_x[n], node_lane[n]) for e in edges for n in e}
 
     def orient(a, b, c):
@@ -3203,6 +3277,8 @@ def count_crossings(node_x, node_lane, edges):
             if max(a[0], b[0]) < min(c[0], d[0]) or max(c[0], d[0]) < min(a[0], b[0]):
                 continue
             o1, o2, o3, o4 = orient(a, b, c), orient(a, b, d), orient(c, d, a), orient(c, d, b)
+            w = trunk_weight if (node_lane[u1] == 0 or node_lane[v1] == 0
+                                  or node_lane[u2] == 0 or node_lane[v2] == 0) else 1
             shared = {u1, v1} & {u2, v2}
             if shared:
                 if o1 == 0 and o2 == 0:          # collinear from the shared junction: overlap?
@@ -3211,11 +3287,11 @@ def count_crossings(node_x, node_lane, edges):
                     q1 = pts[v1 if u1 == s else u1]
                     q2 = pts[v2 if u2 == s else u2]
                     if (q1[0] - p[0]) * (q2[0] - p[0]) + (q1[1] - p[1]) * (q2[1] - p[1]) > 0:
-                        n += 1
+                        n += w
                 continue
             if (o1 != o2 and o3 != o4) or (o1 == 0 and on_seg(a, b, c)) or (o2 == 0 and on_seg(a, b, d)) \
                     or (o3 == 0 and on_seg(c, d, a)) or (o4 == 0 and on_seg(c, d, b)):
-                n += 1
+                n += w
     return n
 
 
