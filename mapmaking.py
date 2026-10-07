@@ -2442,13 +2442,17 @@ def build_map(xlsx_path=DEFAULT_XLSX, title="Geographic Spine Map", tube_style_h
   #wrap {{ width:100vw; height:100vh; overflow:hidden; cursor:grab; touch-action:none; }}
   #wrap.grabbing {{ cursor:grabbing; }}
   #stage {{ transform-origin: 0 0; }}
-  #controls {{ position:fixed; top:12px; right:12px; z-index:10; display:flex; flex-direction:column; gap:6px; }}
+  #controls {{ position:fixed; top:12px; right:12px; z-index:10; display:flex; flex-direction:column;
+               align-items:flex-end; gap:6px; }}
   #legendPanel {{ position:fixed; left:12px; bottom:12px; z-index:10; display:none; pointer-events:none; }}
   #legendPanel.visible {{ display:block; }}
+  #controlsPanel {{ display:none; flex-direction:column; gap:6px; }}
+  #controlsPanel.open {{ display:flex; }}
   #controls button {{ width:36px; height:36px; font-size:20px; border:1px solid #999; background:white;
                        border-radius:6px; cursor:pointer; box-shadow:0 1px 3px rgba(0,0,0,0.2); }}
   #controls button:active {{ background:#eee; }}
   #controls button.active {{ background:#2C6BD1; color:white; }}
+  #controlsToggle.open {{ background:#2C6BD1; color:white; }}
   #gpsMarker {{ display:none; }}
   /* point (tankstation/bridge) names only appear once zoomed in far enough -
      toggled by JS adding/removing 'labels-visible' on #stage */
@@ -2484,15 +2488,18 @@ def build_map(xlsx_path=DEFAULT_XLSX, title="Geographic Spine Map", tube_style_h
 </style>
 </head><body>
 <div id="controls">
-  <button id="zoomIn" title="Inzoomen">+</button>
-  <button id="zoomOut" title="Uitzoomen">&minus;</button>
-  <button id="zoomReset" title="Reset">&#8634;</button>
-  <button id="debugToggle" title="Debug aan/uit">D</button>
-  <button id="bridgeToggle" title="Brug/tunnel namen">B</button>
-  <button id="distToggle" title="Afstanden aan/uit">Km</button>
-  <button id="poiToggle" class="active" title="Bezienswaardigheden aan/uit">&#9733;</button>
-  <button id="gpsToggle" title="Mijn locatie volgen">&#128205;</button>
-  <button id="legendToggle" title="Legenda aan/uit">L</button>
+  <button id="controlsToggle" title="Opties tonen/verbergen">&#9776;</button>
+  <div id="controlsPanel">
+    <button id="zoomIn" title="Inzoomen">+</button>
+    <button id="zoomOut" title="Uitzoomen">&minus;</button>
+    <button id="zoomReset" title="Reset">&#8634;</button>
+    <button id="debugToggle" title="Debug aan/uit">D</button>
+    <button id="bridgeToggle" title="Brug/tunnel namen">B</button>
+    <button id="distToggle" title="Afstanden aan/uit">Km</button>
+    <button id="poiToggle" class="active" title="Bezienswaardigheden aan/uit">&#9733;</button>
+    <button id="gpsToggle" title="Mijn locatie volgen">&#128205;</button>
+    <button id="legendToggle" title="Legenda aan/uit">L</button>
+  </div>
 </div>
 {legend_html}
 <div id="wrap"><div id="stage" class="pois-on">{svg}</div></div>
@@ -2500,6 +2507,12 @@ def build_map(xlsx_path=DEFAULT_XLSX, title="Geographic Spine Map", tube_style_h
 (function() {{
   const wrap = document.getElementById('wrap');
   const stage = document.getElementById('stage');
+  const controlsToggle = document.getElementById('controlsToggle');
+  const controlsPanel = document.getElementById('controlsPanel');
+  controlsToggle.onclick = () => {{
+    controlsPanel.classList.toggle('open');
+    controlsToggle.classList.toggle('open');
+  }};
   const LABEL_ZOOM_THRESHOLD = 2.5;  // scale at which point names appear
   const BADGE_ZOOM_THRESHOLD = {BADGE_ZOOM_THRESHOLD};  // scale at which brand badges appear
   const MARKER_TIER_ZOOM = {json.dumps(MARKER_TIER_ZOOM)};  // scale per declutter tier (see mapmaking.py)
@@ -2754,7 +2767,9 @@ HIERARCHY_WIDTH = {"Primary": 5.0, "Secondary": 4.0, "Connector": 3.0, "Local": 
 TIER_RADIUS = {"Small": 5.0, "Medium": 8.0, "Large": 12.0}
 LANE_HEIGHT = 90.0   # px per lane, downward
 STEP_X = 110.0       # px per ordinal hop
-MARGIN_PX = 60
+MARGIN_PX = 100   # extra room around the route canvas, so the floating
+                  # controls panel has blank space to sit over even when
+                  # zoomed in near an edge, instead of overlapping the route
 
 ROAD_PALETTE = [
     "#1B3A6B", "#C0392B", "#1E8449", "#B9770E", "#6C3483", "#117864",
@@ -3620,9 +3635,14 @@ HTML_TEMPLATE = """<!DOCTYPE html>
                      paint-order:stroke; stroke:#fbfaf6; stroke-width:2.4px; stroke-linejoin:round; }}
   .dist-label text {{ font-size:{dist_font}px; font-weight:700; fill:#185FA5;
                       paint-order:stroke; stroke:#fbfaf6; stroke-width:2.8px; stroke-linejoin:round; }}
-  #controls {{ position:absolute; top:12px; right:12px; z-index:5; display:flex; flex-direction:column; gap:6px; }}
+  #controls {{ position:absolute; top:12px; right:12px; z-index:5; display:flex; flex-direction:column;
+               align-items:flex-end; gap:6px; }}
+  #controlsPanel {{ display:none; flex-direction:column; align-items:stretch; gap:6px; }}
+  #controlsPanel.open {{ display:flex; }}
   #controls button {{ font-size:13px; padding:6px 10px; border-radius:6px; border:1px solid #999; background:#fff; cursor:pointer; }}
   #controls button.active {{ background:#1B3A6B; color:#fff; border-color:#1B3A6B; }}
+  #controlsToggle {{ width:36px; height:36px; font-size:18px; padding:0; align-self:flex-end; }}
+  #controlsToggle.open {{ background:#1B3A6B; color:#fff; border-color:#1B3A6B; }}
   #info {{ position:absolute; bottom:10px; left:12px; z-index:5; font-size:12px; color:#444; background:rgba(255,255,255,.85);
            padding:4px 8px; border-radius:6px; max-width:60vw; }}
   #title {{ position:absolute; left:12px; top:12px; z-index:5; font-size:14px; font-weight:700; color:#1B3A6B;
@@ -3632,13 +3652,16 @@ HTML_TEMPLATE = """<!DOCTYPE html>
 <body>
 <div id="title">{title}</div>
 <div id="controls">
-  <button id="zoomIn">+</button>
-  <button id="zoomOut">&minus;</button>
-  <button id="zoomReset">reset</button>
-  <button id="toggleFuel" class="active">Tankstations</button>
-  <button id="toggleBridges">Bruggen/tunnels</button>
-  <button id="toggleDist" class="active">Afstanden</button>
-  <button id="togglePoi" class="active">&#9733; Bezienswaardigheden</button>
+  <button id="controlsToggle" title="Opties tonen/verbergen">&#9776;</button>
+  <div id="controlsPanel">
+    <button id="zoomIn">+</button>
+    <button id="zoomOut">&minus;</button>
+    <button id="zoomReset">reset</button>
+    <button id="toggleFuel" class="active">Tankstations</button>
+    <button id="toggleBridges">Bruggen/tunnels</button>
+    <button id="toggleDist" class="active">Afstanden</button>
+    <button id="togglePoi" class="active">&#9733; Bezienswaardigheden</button>
+  </div>
 </div>
 <div id="info">hoofdroute ca. {shortest_km:.0f} km &middot; {route_count} route-varianten getoond (marge {margin_pct:.0f}% per traject)</div>
 <div id="wrap"><div id="stage" class="points-visible distances-on pois-on">{svg}</div></div>
@@ -3646,6 +3669,12 @@ HTML_TEMPLATE = """<!DOCTYPE html>
 (function() {{
   const stage = document.getElementById('stage');
   const wrap = document.getElementById('wrap');
+  const controlsToggle = document.getElementById('controlsToggle');
+  const controlsPanel = document.getElementById('controlsPanel');
+  controlsToggle.onclick = () => {{
+    controlsPanel.classList.toggle('open');
+    controlsToggle.classList.toggle('open');
+  }};
   let scale = 1, tx = 0, ty = 0;
   let dragging = false, lastX = 0, lastY = 0;
 

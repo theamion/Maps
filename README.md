@@ -263,6 +263,18 @@ its own small fixed-position SVG, not part of the zoomable `#stage`, so it
 stays a constant, legible size and never blocks map panning/zooming
 (`pointer-events:none`) regardless of the map's own zoom level.
 
+### Controls panel (Kaart and Route)
+
+All the per-view toggle/zoom buttons (zoom, legend, bridge/POI/distance
+toggles, GPS, debug) live behind a single &#9776; button, collapsed by
+default, instead of sitting on screen the whole time - every one of them
+still works exactly the same once opened (same ids, same click handlers),
+only the container around them is collapsible. This keeps them from
+covering the route/map itself when you've panned or zoomed into a corner,
+since a collapsed panel has nothing to overlap with. Route diagrams also get
+extra blank margin around the canvas itself (`MARGIN_PX`), so there's more
+natural empty space for the panel to sit over even before you open it.
+
 ### How the map layout works
 
 1. **Projection:** junction lat/lon are projected to normalised map units
