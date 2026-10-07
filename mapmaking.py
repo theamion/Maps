@@ -1653,29 +1653,35 @@ def resolve_road_crossings(segments, polylines, roads, max_passes=3):
                 if {s1['from'], s1['to']} & {s2['from'], s2['to']}:
                     continue  # shares a real junction - a legitimate meeting point
                 p1, p2 = polylines[e1], polylines[e2]
-                crossing_pt = None
+                hit = None
                 for a in range(len(p1)-1):
                     for b in range(len(p2)-1):
                         if segments_intersect(p1[a], p1[a+1], p2[b], p2[b+1]):
-                            ax, ay = p1[a]; bx, by = p1[a+1]
-                            crossing_pt = ((ax+bx)/2, (ay+by)/2)
+                            hit = (a, b)
                             break
-                    if crossing_pt:
+                    if hit:
                         break
-                if not crossing_pt:
+                if not hit:
                     continue
+                a, b = hit
                 h1, h2 = hier_of(e1), hier_of(e2)
-                lower_eid, lower_poly = (e2, p2) if hier_rank[h2] <= hier_rank[h1] else (e1, p1)
-                # jog the lower-hierarchy line's nearest vertex pair with a
-                # small perpendicular offset at the crossing point
-                lx, ly = crossing_pt
-                a0, b0 = lower_poly[0], lower_poly[-1]
-                dx, dy = b0[0]-a0[0], b0[1]-a0[1]
+                if hier_rank[h2] <= hier_rank[h1]:
+                    lower_eid, lower_poly, idx = e2, p2, b
+                else:
+                    lower_eid, lower_poly, idx = e1, p1, a
+                # jog just the one leg of the lower-hierarchy line that
+                # actually crosses, with a small perpendicular offset at the
+                # crossing point - every other vertex (including any
+                # octilinear bend or forced-direction stub) is kept as-is,
+                # rather than collapsing the whole line to start/mid/end
+                p_before, p_after = lower_poly[idx], lower_poly[idx+1]
+                cx, cy = (p_before[0]+p_after[0])/2, (p_before[1]+p_after[1])/2
+                dx, dy = p_after[0]-p_before[0], p_after[1]-p_before[1]
                 length = math.hypot(dx, dy) or 1
                 perp = (-dy/length, dx/length)
-                offset = 0.12
-                new_pt = (lx + perp[0]*offset, ly + perp[1]*offset)
-                polylines[lower_eid] = [a0, new_pt, b0]
+                offset = 0.3
+                new_pt = (cx + perp[0]*offset, cy + perp[1]*offset)
+                polylines[lower_eid] = lower_poly[:idx+1] + [new_pt] + lower_poly[idx+1:]
                 moved_any = True
         if not moved_any:
             break
