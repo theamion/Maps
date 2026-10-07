@@ -80,6 +80,9 @@ FUEL_BRAND_COLOURS = [
     ("Tinq", "#E2001A", "#FFFFFF", "Tinq"),
     ("Tango", "#E2001A", "#FFFFFF", "Tango"),
     ("AS24", "#1A1A1A", "#FFFFFF", "AS24"),
+    ("OK", "#F39200", "#1A1A1A", "OK"),
+    ("Samba Oil", "#1A1A1A", "#FFC600", "Samba"),
+    ("Tamoil", "#004B87", "#FFFFFF", "Tamoil"),
 ]
 FOOD_BRAND_COLOURS = [
     ("McDonald's", "#DA291C", "#FFC72C", "M"),
@@ -93,6 +96,9 @@ FOOD_BRAND_COLOURS = [
     ("Coffee Fellows", "#4A2E19", "#FFFFFF", "CoffF."),
     ("Tabilo", "#8B5A2B", "#FFFFFF", "Tabilo"),
     ("Lavazza", "#6F1D1D", "#FFFFFF", "Lavazza"),
+    ("La Place", "#006241", "#FFFFFF", "La Place"),
+    ("Spar", "#006838", "#FFFFFF", "Spar"),
+    ("Albert Heijn to go", "#00A0DC", "#FFFFFF", "AH to go"),
 ]
 
 ICON_SIZE = 8.5     # map: brand icon tile side length, in SVG units
