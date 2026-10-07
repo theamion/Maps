@@ -457,7 +457,12 @@ def marker_extent(sx, sy, ang, cat, sides, side, length_m):
         pts = [(sx + nx_ * s * half_len + tx * t * half_w, sy + ny_ * s * half_len + ty * t * half_w)
                for s in (-1, 1) for t in (-1, 1)]
         reach = half_len + 0.8
-    elif cat in ('tankstation', 'autohof'):
+    elif cat == 'autohof':
+        offset, radius = 9.0, 4.5
+        ox, oy = sx + nx_ * side * offset, sy + ny_ * side * offset
+        pts = [(ox - radius, oy - radius), (ox + radius, oy + radius)]
+        reach = offset + radius + 0.8
+    elif cat == 'tankstation':
         length, base = 10.0, 4.5
         pts = [(sx + nx_ * side * length, sy + ny_ * side * length),
                (sx + tx * base, sy + ty * base), (sx - tx * base, sy - ty * base)]
@@ -1325,6 +1330,7 @@ def load_points_v2(wb, junctions):
             'facilities': row[idx.get('Facilities')] if 'Facilities' in idx else None,
             'food_brand': row[idx.get('Food brand(s)')] if 'Food brand(s)' in idx else None,
             'side_direction': row[idx.get('Side direction')] if 'Side direction' in idx else None,
+            'exit_number': row[idx.get('Exit number')] if 'Exit number' in idx else None,
         })
     return points
 
@@ -1410,7 +1416,7 @@ def point_at_fraction_on_polyline(poly, frac):
 
 # ------------------------------------------------------------- symbols ---
 
-MARKER_COLOUR = {'tankstation': '#A83232', 'autohof': '#A83232',
+MARKER_COLOUR = {'tankstation': '#A83232', 'autohof': '#1B5FA8',
                   'brug (dal)': '#B0B0B0', 'brug (rivier)': '#185FA5',
                   'tunnel': '#5F5E5A', 'ecoduct': '#3B6D11', 'poi': '#3B6D11'}
 BAR_CATEGORIES = {'brug (dal)', 'brug (rivier)', 'tunnel', 'ecoduct'}
@@ -1495,6 +1501,20 @@ def fuel_marker_svg(cx, cy, angle_deg, sides, colour, side=1, length=10, base=4.
     else:
         pts = [(cx+px*length, cy+py*length), (cx-lx*base, cy-ly*base),
                (cx+lx*base, cy+ly*base)]
+    s = " ".join(f"{x:.1f},{y:.1f}" for x, y in pts)
+    return f'<polygon points="{s}" fill="{colour}" stroke="white" stroke-width="0.5"/>'
+
+
+def autohof_marker_svg(cx, cy, angle_deg, colour, side=1, offset=9, radius=4.5):
+    """A regular hexagon, offset to the given side of the road the same way
+    fuel_marker_svg's triangle tip is - an Autohof is an independently-run
+    service area, not necessarily tied to one fuel brand, so it gets its
+    own shape (and MARKER_COLOUR's own blue) instead of sharing the
+    tankstation's directional triangle/diamond."""
+    a = math.radians(angle_deg); perp = a + math.pi / 2
+    ox, oy = cx + math.cos(perp) * side * offset, cy + math.sin(perp) * side * offset
+    pts = [(ox + math.cos(math.radians(60 * i - 30)) * radius,
+             oy + math.sin(math.radians(60 * i - 30)) * radius) for i in range(6)]
     s = " ".join(f"{x:.1f},{y:.1f}" for x, y in pts)
     return f'<polygon points="{s}" fill="{colour}" stroke="white" stroke-width="0.5"/>'
 
@@ -1864,6 +1884,7 @@ def build_legend_html():
         (junction_circle_svg(0, 0, 'Junction', 'Large'), 'Grote aansluiting'),
         (junction_circle_svg(0, 0, 'Junction', 'Small'), 'Kleine aansluiting'),
         (fuel_marker_svg(0, 0, 90, 2, MARKER_COLOUR['tankstation'], length=7, base=7), 'Tankstation'),
+        (autohof_marker_svg(0, 0, 90, MARKER_COLOUR['autohof'], side=1, offset=0, radius=6), 'Autohof (afritnummer)'),
         (bar_svg(0, 0, 90, MARKER_COLOUR['brug (dal)'], length_m=500, bar_len=15), 'Brug'),
         (bar_svg(0, 0, 90, MARKER_COLOUR['tunnel'], length_m=500, bar_len=15), 'Tunnel'),
         (star_svg(0, 0, 7, 'poi-star'), 'Bezienswaardigheid'),
@@ -2137,6 +2158,10 @@ def render_map(junctions, segments, pos, roads, points, border_data, border_node
             sx, sy = X(px), Y(py)
             cat = (p['category'] or '').lower()
             info = point_badge_info.get(p['id']) if cat in ('tankstation', 'autohof') else None
+            # an Autohof's label states its exit number (e.g. "(afrit 47)")
+            # rather than a brand badge - it's an independent service area,
+            # not tied to one fuel brand
+            exit_suffix = f" (afrit {p['exit_number']:.0f})" if cat == 'autohof' and p.get('exit_number') else ''
             if info and info['mode'] == 'sided':
                 for sign, (side_word, entries) in info['sides'].items():
                     box, reach = marker_extent(sx, sy, ang, cat, 1, sign, p.get('length_m'))
@@ -2144,7 +2169,7 @@ def render_map(junctions, segments, pos, roads, points, border_data, border_node
                         placer.add_box(box)
                     point_marks.append(dict(p=p, sx=sx, sy=sy, ang=ang, cat=cat, side=sign,
                                             box=box, reach=reach, badges=entries,
-                                            name_suffix=f" ({side_word.capitalize()})"))
+                                            name_suffix=f" ({side_word.capitalize()})" + exit_suffix))
                 continue
             side = one_sided_marker_side(p, fj, tj) if cat in ('tankstation', 'autohof') and p['sides'] == 1 else 1
             box, reach = marker_extent(sx, sy, ang, cat, p['sides'], side, p.get('length_m'))
@@ -2152,7 +2177,7 @@ def render_map(junctions, segments, pos, roads, points, border_data, border_node
                 placer.add_box(box)
             point_marks.append(dict(p=p, sx=sx, sy=sy, ang=ang, cat=cat, side=side,
                                     box=box, reach=reach, badges=(info['entries'] if info else []),
-                                    name_suffix=''))
+                                    name_suffix=exit_suffix))
 
     # zoom-dependent declutter tiers for bridge/tunnel/fuel markers: which
     # zoom stage each one first appears at, so zoomed out shows a sparse
@@ -2257,7 +2282,11 @@ def render_map(junctions, segments, pos, roads, points, border_data, border_node
                 if cat in BAR_CATEGORIES:
                     marker = bar_svg(sx, sy, ang, MARKER_COLOUR.get(cat, '#999'), length_m=p.get('length_m'))
                     parts.append(f'<g class="{tier_class}">{marker}</g>' if tier_class else marker)
-                elif cat in ('tankstation', 'autohof'):
+                elif cat == 'autohof':
+                    side = one_sided_marker_side(p, fj, tj) if p['sides'] == 1 else 1
+                    markers = autohof_marker_svg(sx, sy, ang, MARKER_COLOUR['autohof'], side=side)
+                    parts.append(f'<g class="{tier_class}">{markers}</g>' if tier_class else markers)
+                elif cat == 'tankstation':
                     info = point_badge_info.get(p['id'])
                     if info and info['mode'] == 'sided':
                         # a different brand per side: two one-sided markers,
@@ -2845,6 +2874,7 @@ def load_data(xlsx_path):
     pts_header = [c.value for c in wb["Points"][1]]
     from_start_col = pts_header.index("OSM DistanceFromStart (km)") if "OSM DistanceFromStart (km)" in pts_header else None
     food_brand_col = pts_header.index("Food brand(s)") if "Food brand(s)" in pts_header else None
+    exit_number_col = pts_header.index("Exit number") if "Exit number" in pts_header else None
     for row in wb["Points"].iter_rows(min_row=2, values_only=True):
         if not row[0] or not row[9]:
             continue
@@ -2859,6 +2889,7 @@ def load_data(xlsx_path):
             order=row[11] or 0, brand=row[12], facilities=row[13], length_m=length_m,
             food_brand=row[food_brand_col] if food_brand_col is not None else None,
             from_start_km=row[from_start_col] if from_start_col is not None else None,
+            exit_number=row[exit_number_col] if exit_number_col is not None else None,
         ))
     for eid in points_by_edge:
         points_by_edge[eid].sort(key=lambda p: (p["pos"], p["order"] or 0))
@@ -3268,11 +3299,15 @@ def rebase_wide_runs(runs, run_parent, run_rejoin, node_x, node_lane, edges_draw
     by coincidence, not by any real proximity.
 
     The fix has to touch x, not lane: push one run's interior nodes past
-    the current far edge of the diagram, onto hop-range nobody else
-    occupies, so none of its edges can conflict with anything any more.
-    Only ever tries runs that currently sit on an actual crossing (there
-    can be dozens of uninvolved runs in a big diagram - testing all of them
-    would be far too slow), shortest first, keeping a move only if
+    hop-range nobody else occupies, so none of its edges can conflict with
+    anything any more. Tries just past whatever that run is actually
+    crossing first (usually a short push), and only falls back to past the
+    current far edge of the WHOLE diagram if that local push wasn't enough
+    to clear every conflict - the local option keeps the added length
+    close to the conflict itself instead of past everything downstream of
+    it too. Only ever tries runs that currently sit on an actual crossing
+    (there can be dozens of uninvolved runs in a big diagram - testing all
+    of them would be far too slow), shortest first, keeping a move only if
     re-picking lanes for the new layout actually reduces real crossings -
     so this can never make things worse, only trade an unsolvable lane
     problem for a slightly wider diagram.
@@ -3297,13 +3332,23 @@ def rebase_wide_runs(runs, run_parent, run_rejoin, node_x, node_lane, edges_draw
         pairs = count_crossings(node_x, node_lane, edges, return_pairs=True)
         if not pairs:
             break
-        implicated, seen = [], set()
+        # for each implicated run, also track the furthest x among whatever
+        # it's actually crossing - pushing just past THAT is usually enough,
+        # and far cheaper (a much shorter diagram) than the global max,
+        # which is only needed as a fallback when the local push isn't
+        # enough to clear every conflict
+        implicated, seen, local_max = [], set(), {}
         for (e1, e2) in pairs:
-            for u, v in (e1, e2):
-                run = node_to_run.get(u) or node_to_run.get(v)
-                if run is not None and id(run) not in seen:
-                    seen.add(id(run))
-                    implicated.append(run)
+            for this_e, other_e in ((e1, e2), (e2, e1)):
+                for node in this_e:
+                    run = node_to_run.get(node)
+                    if run is None:
+                        continue
+                    far = max(node_x[n] for n in other_e)
+                    local_max[id(run)] = max(local_max.get(id(run), far), far)
+                    if id(run) not in seen:
+                        seen.add(id(run))
+                        implicated.append(run)
         implicated.sort(key=len)
 
         improved = False
@@ -3315,24 +3360,34 @@ def rebase_wide_runs(runs, run_parent, run_rejoin, node_x, node_lane, edges_draw
                 saved_x[destination] = node_x[destination]
             saved_lane = dict(node_lane)
 
-            new_start = max(node_x.values()) + 1.0
-            for k, node in enumerate(run, start=1):
-                node_x[node] = new_start + k
-            if destination is not None:
-                run_end = new_start + len(run)
-                if node_x[destination] <= run_end:
-                    node_x[destination] = run_end + 1.0
+            targets = []
+            local_target = local_max.get(id(run))
+            if local_target is not None:
+                targets.append(local_target + 1.0)
+            global_target = max(node_x.values()) + 1.0
+            if not targets or abs(global_target - targets[0]) > 1e-6:
+                targets.append(global_target)  # fallback if the local push wasn't enough
 
-            untangle_lanes(runs, node_x, node_lane, edges_drawn)
-            enforce_nesting(runs, run_parent, node_x, node_lane, edges_drawn)
-            c = crossings()
-            if c < best:
-                best, improved = c, True
-            else:
+            moved = False
+            for new_start in targets:
+                for k, node in enumerate(run, start=1):
+                    node_x[node] = new_start + k
+                if destination is not None:
+                    run_end = new_start + len(run)
+                    if node_x[destination] <= run_end:
+                        node_x[destination] = run_end + 1.0
+
+                untangle_lanes(runs, node_x, node_lane, edges_drawn)
+                enforce_nesting(runs, run_parent, node_x, node_lane, edges_drawn)
+                c = crossings()
+                if c < best:
+                    best, moved = c, True
+                    break
                 node_x.update(saved_x)
                 node_lane.clear()
                 node_lane.update(saved_lane)
-            if best == 0 or improved:
+            if moved:
+                improved = True
                 break  # positions shifted - re-derive which edges still cross
         if not improved:
             break
