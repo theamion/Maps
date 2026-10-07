@@ -3056,6 +3056,7 @@ def layout_routes(accepted):
     # side_intervals[side][depth] = list of (x_min, x_max) already used at that depth
     side_intervals = {1: defaultdict(list), -1: defaultdict(list)}
     run_parent = {}           # run's first interior node -> the junction it attached to
+    run_rejoin = {}           # run's first interior node -> the junction it rejoined
     GAP = 0.35
 
     main_path = accepted[0][0]
@@ -3126,12 +3127,14 @@ def layout_routes(accepted):
                 run = path[attach_idx + 1:rejoin_idx]
                 runs.append(run)
                 run_parent[run[0]] = path[attach_idx]
+                run_rejoin[run[0]] = path[rejoin_idx]
             for k in range(attach_idx, rejoin_idx):
                 edges_drawn[frozenset((path[k], path[k + 1]))] = (path[k], path[k + 1])
             i = rejoin_idx
 
     untangle_lanes(runs, node_x, node_lane, edges_drawn)
     enforce_nesting(runs, run_parent, node_x, node_lane, edges_drawn)
+    rebase_wide_runs(runs, run_parent, run_rejoin, node_x, node_lane, edges_drawn)
     return node_x, node_lane, edges_drawn
 
 
@@ -3249,15 +3252,91 @@ def enforce_nesting(runs, run_parent, node_x, node_lane, edges_drawn, passes=6):
             break
 
 
-def count_crossings(node_x, node_lane, edges, trunk_weight=1):
+def rebase_wide_runs(runs, run_parent, run_rejoin, node_x, node_lane, edges_drawn, passes=3):
+    """Even with a correct nesting invariant, no side/depth assignment can
+    make the diagram fully crossing-free if its x-order itself is
+    contradictory: treating "does edge A's hop-range properly interleave
+    with edge B's" as a conflict graph (A and B must then be on opposite
+    sides, exactly the standard 2-page book embedding condition for a
+    fixed left-to-right order), an ODD CYCLE in that graph is a proof that
+    no 2-sided lane assignment can avoid every crossing - some edges
+    genuinely cannot both be satisfied simultaneously. This isn't a flaw in
+    the roads; it's an accident of hop-counting: an unrelated alternate
+    that happens to take about as many stops to get between two junctions
+    as a completely different detour ends up sharing its hop-range purely
+    by coincidence, not by any real proximity.
+
+    The fix has to touch x, not lane: push one run's interior nodes past
+    the current far edge of the diagram, onto hop-range nobody else
+    occupies, so none of its edges can conflict with anything any more.
+    Only ever tries runs that currently sit on an actual crossing (there
+    can be dozens of uninvolved runs in a big diagram - testing all of them
+    would be far too slow), shortest first, keeping a move only if
+    re-picking lanes for the new layout actually reduces real crossings -
+    so this can never make things worse, only trade an unsolvable lane
+    problem for a slightly wider diagram."""
+    edges = list(edges_drawn.values())
+    node_to_run = {n: run for run in runs for n in run}
+
+    def crossings():
+        return count_crossings(node_x, node_lane, edges)
+
+    best = crossings()
+    if best == 0:
+        return
+
+    for _ in range(passes):
+        pairs = count_crossings(node_x, node_lane, edges, return_pairs=True)
+        if not pairs:
+            break
+        implicated, seen = [], set()
+        for (e1, e2) in pairs:
+            for u, v in (e1, e2):
+                run = node_to_run.get(u) or node_to_run.get(v)
+                if run is not None and id(run) not in seen:
+                    seen.add(id(run))
+                    implicated.append(run)
+        implicated.sort(key=len)
+
+        improved = False
+        for run in implicated:
+            if run_parent.get(run[0]) is None or run_rejoin.get(run[0]) is None:
+                continue
+            saved_x = {n: node_x[n] for n in run}
+            saved_lane = dict(node_lane)
+
+            new_start = max(node_x.values()) + 1.0
+            for k, node in enumerate(run, start=1):
+                node_x[node] = new_start + k
+
+            untangle_lanes(runs, node_x, node_lane, edges_drawn)
+            enforce_nesting(runs, run_parent, node_x, node_lane, edges_drawn)
+            c = crossings()
+            if c < best:
+                best, improved = c, True
+            else:
+                node_x.update(saved_x)
+                node_lane.clear()
+                node_lane.update(saved_lane)
+            if best == 0 or improved:
+                break  # positions shifted - re-derive which edges still cross
+        if not improved:
+            break
+
+
+def count_crossings(node_x, node_lane, edges, trunk_weight=1, return_pairs=False):
     """Pairs of drawn edges that cross, or run on top of each other, anywhere
     other than at a junction they share. `trunk_weight` counts a crossing
     that touches the trunk (lane 0 - the thick Primary line everything else
     reads off of) that many times as heavily as an ordinary branch-vs-branch
     crossing, which is far less visually jarring; left at 1 (plain count)
     for untangle_lanes' own search, raised for enforce_nesting's, where the
-    fix for one crossing can otherwise trade it for several lesser ones."""
+    fix for one crossing can otherwise trade it for several lesser ones.
+    `return_pairs=True` returns the list of crossing (edge, edge) pairs
+    themselves (unweighted) instead of the weighted count, for rebase_wide_
+    runs to target - which edges are involved, not how much they count for."""
     pts = {n: (node_x[n], node_lane[n]) for e in edges for n in e}
+    pairs = []
 
     def orient(a, b, c):
         v = (b[0] - a[0]) * (c[1] - a[1]) - (b[1] - a[1]) * (c[0] - a[0])
@@ -3288,11 +3367,13 @@ def count_crossings(node_x, node_lane, edges, trunk_weight=1):
                     q2 = pts[v2 if u2 == s else u2]
                     if (q1[0] - p[0]) * (q2[0] - p[0]) + (q1[1] - p[1]) * (q2[1] - p[1]) > 0:
                         n += w
+                        pairs.append((edges[i], edges[j]))
                 continue
             if (o1 != o2 and o3 != o4) or (o1 == 0 and on_seg(a, b, c)) or (o2 == 0 and on_seg(a, b, d)) \
                     or (o3 == 0 and on_seg(c, d, a)) or (o4 == 0 and on_seg(c, d, b)):
                 n += w
-    return n
+                pairs.append((edges[i], edges[j]))
+    return pairs if return_pairs else n
 
 
 # --------------------------------------------------------------------------
