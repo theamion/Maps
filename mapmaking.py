@@ -1032,60 +1032,6 @@ def path_crosses_roads(path, road_polylines, skip_near, tol=0.15):
     return False
 
 
-def orthogonal_route(a, b, road_polylines=None, skip_near=None, max_tries=8):
-    """Border lines only ever bend at right angles. Tries the two natural
-    single-elbow corners first; if both illegally cross a road away from
-    the segment's own endpoints, inserts a small LOCAL notch around the
-    actual crossing point (not a full-length parallel shift of the whole
-    segment, which would read as an unrelated extra line cutting across
-    unrelated clusters) - grown only as far as needed to clear."""
-    ax, ay = a; bx, by = b
-    road_polylines = road_polylines or []
-    skip_near = skip_near or [a, b]
-
-    if abs(bx-ax) < 1e-9 or abs(by-ay) < 1e-9:
-        return [a, b]
-
-    # default: bend at the midpoint - a Z-shape with two 90-degree turns,
-    # which reliably clears more obstacles than a single-elbow L-shape
-    # (per project convention, this is the preferred default, not just a
-    # fallback)
-    mid_x, mid_y = ax + (bx-ax)/2, ay + (by-ay)/2
-    z_vertical_first = [a, (ax, mid_y), (bx, mid_y), b]
-    z_horizontal_first = [a, (mid_x, ay), (mid_x, by), b]
-    for candidate in (z_vertical_first, z_horizontal_first):
-        if not path_crosses_roads(candidate, road_polylines, skip_near):
-            return candidate
-
-    corner1 = (bx, ay)  # horizontal first, then vertical
-    corner2 = (ax, by)  # vertical (south/north) first, then horizontal
-    for corner in (corner2, corner1):
-        candidate = [a, corner, b]
-        if not path_crosses_roads(candidate, road_polylines, skip_near):
-            return candidate
-
-    # neither simple elbow is clear - insert a small local notch around the
-    # actual crossing point (using corner1's path as the base to notch)
-    base = [a, corner2, b]
-    for attempt in range(1, max_tries + 1):
-        notch = 0.10 * attempt
-        # notch near the vertical leg (a -> corner1)
-        mid_v = ((ax + corner1[0]) / 2, (ay + corner1[1]) / 2)
-        for sign in (1, -1):
-            nx = mid_v[0] + notch * sign
-            candidate = [a, (nx, ay), (nx, corner1[1]), corner1, b]
-            if not path_crosses_roads(candidate, road_polylines, skip_near):
-                return candidate
-        # notch near the horizontal leg (corner1 -> b)
-        mid_h = ((corner1[0] + bx) / 2, (corner1[1] + by) / 2)
-        for sign in (1, -1):
-            ny = mid_h[1] + notch * sign
-            candidate = [a, corner1, (corner1[0], ny), (bx, ny), b]
-            if not path_crosses_roads(candidate, road_polylines, skip_near):
-                return candidate
-    return base
-
-
 # --------------------------------------------------------- road colours ---
 
 def road_key(road):
@@ -1763,7 +1709,8 @@ ROUTE_END_FREE = 0.07     # around a route's own endpoints obstacles don't count
 ROUTE_END_FREE_CELLS = 1.5  # A*: obstacle cells this close to the start/end cell are free
 ROUTE_CROSS_COST = 400.0  # cost of entering an obstacle cell
 ROUTE_TURN_COST = 4.0     # borders: cost of a 90-degree bend (keeps them simple)
-BORDER_CLEARANCE = 0.12   # borders keep at least this far from other borders
+BORDER_CLEARANCE = 0.12   # borders keep at least this far from roads, rivers and other borders
+BORDER_END_FREE = 0.25    # ...except this close to their own endpoints (a crossing sits on a road)
 
 
 def _seg_intersection(p1, p2, p3, p4):
@@ -1818,14 +1765,34 @@ def route_too_close(path, others, ends, clearance=BORDER_CLEARANCE, free=ROUTE_E
     return False
 
 
+def route_overlaps(path, others, eps=1e-6):
+    """True if a horizontal or vertical leg of `path` lies on top of a leg
+    of another line over any stretch (touching in one point is fine)."""
+    for p1, p2 in zip(path, path[1:]):
+        for poly in others:
+            for q1, q2 in zip(poly, poly[1:]):
+                if abs(p1[1]-p2[1]) < eps and abs(q1[1]-q2[1]) < eps and abs(p1[1]-q1[1]) < eps:
+                    lo, hi = max(min(p1[0], p2[0]), min(q1[0], q2[0])), min(max(p1[0], p2[0]), max(q1[0], q2[0]))
+                elif abs(p1[0]-p2[0]) < eps and abs(q1[0]-q2[0]) < eps and abs(p1[0]-q1[0]) < eps:
+                    lo, hi = max(min(p1[1], p2[1]), min(q1[1], q2[1])), min(max(p1[1], p2[1]), max(q1[1], q2[1]))
+                else:
+                    continue
+                if hi - lo > eps:
+                    return True
+    return False
+
+
 class ObstacleGrid:
     """Obstacle lines rasterised onto a grid of ROUTE_CELL cells: each cell
-    stores how many obstacle lines run through it (with a margin)."""
+    stores how many obstacle lines run through it (with a margin). Lines
+    added with hard=True (other borders) only get the minimal free zone
+    around a route's endpoints in astar_route, never the wider one."""
 
     def __init__(self):
         self.cells = defaultdict(int)
+        self.hard = set()
 
-    def add(self, poly, margin=0.0):
+    def add(self, poly, margin=0.0, hard=False):
         g = ROUTE_CELL
         r = int(math.ceil(margin / g))
         for p1, p2 in zip(poly, poly[1:]):
@@ -1840,9 +1807,11 @@ class ObstacleGrid:
                         seen.add((ci + di, cj + dj))
             for c in seen:
                 self.cells[c] += 1
+            if hard:
+                self.hard.update(seen)
 
 
-def astar_route(a, b, grid, orthogonal, max_expand=400000):
+def astar_route(a, b, grid, orthogonal, max_expand=3000000, free_cells=None):
     """Cheapest grid path from a to b. Obstacle cells cost ROUTE_CROSS_COST
     to enter, except within ROUTE_END_FREE of a or b. orthogonal=True:
     4-way moves with a cost per bend (borders); else 8-way moves (rivers).
@@ -1852,15 +1821,18 @@ def astar_route(a, b, grid, orthogonal, max_expand=400000):
     centre = lambda c: ((c[0] + 0.5) * g, (c[1] + 0.5) * g)
     s, t = cell(a), cell(b)
     span = max(abs(t[0]-s[0]), abs(t[1]-s[1]))
-    pad = max(15, span // 2)
+    # search well beyond the endpoints: going around a whole cluster of roads
+    # can take a big detour
+    pad = max(60, span * 2)
     lo_i, hi_i = min(s[0], t[0]) - pad, max(s[0], t[0]) + pad
     lo_j, hi_j = min(s[1], t[1]) - pad, max(s[1], t[1]) + pad
-    free_r = ROUTE_END_FREE_CELLS
+    free_r = ROUTE_END_FREE_CELLS if free_cells is None else free_cells
 
     def enter_cost(c):
         if grid.cells.get(c, 0) == 0:
             return 0.0
-        if math.hypot(c[0]-s[0], c[1]-s[1]) <= free_r or math.hypot(c[0]-t[0], c[1]-t[1]) <= free_r:
+        r = min(free_r, ROUTE_END_FREE_CELLS) if c in grid.hard else free_r
+        if math.hypot(c[0]-s[0], c[1]-s[1]) <= r or math.hypot(c[0]-t[0], c[1]-t[1]) <= r:
             return 0.0
         return ROUTE_CROSS_COST
 
@@ -1997,8 +1969,10 @@ def route_river(a, b, obstacles, grid):
 def route_border(a, b, obstacles, borders, grid, first_try=None):
     """A border from a to b: orthogonal legs only. The classic Z/L shapes
     (and `first_try`, e.g. a tripoint's assigned first direction) are used
-    when they cross nothing and keep clear of other borders; otherwise an
-    orthogonal A* path with few bends."""
+    when they cross nothing and keep clear of roads, rivers and other
+    borders (no running alongside them); otherwise an orthogonal A* path
+    with few bends. `grid` must hold every obstacle with BORDER_CLEARANCE
+    as its margin."""
     ends = [a, b]
     ax, ay = a
     bx, by = b
@@ -2009,16 +1983,21 @@ def route_border(a, b, obstacles, borders, grid, first_try=None):
         mx, my = (ax + bx) / 2, (ay + by) / 2
         candidates += [[a, (ax, my), (bx, my), b], [a, (mx, ay), (mx, by), b],
                        [a, (ax, by), b], [a, (bx, ay), b]]
+    everything = obstacles + borders
+    # near its own endpoints a border may run close to a road or river (a
+    # crossing sits on the road), but only just as close to another border
+    # as two borders leaving a shared tripoint at right angles need
+    too_close = lambda p: (route_too_close(p, obstacles, ends, free=BORDER_END_FREE)
+                           or route_too_close(p, borders, ends, free=BORDER_CLEARANCE * 1.5)
+                           or route_overlaps(p, borders))
     for c in candidates:
-        if route_crossings(c, obstacles + borders, ends) == 0 and not route_too_close(c, borders, ends):
+        if route_crossings(c, everything, ends) == 0 and not too_close(c):
             return c
-    cells = astar_route(a, b, grid, orthogonal=True)
+    cells = astar_route(a, b, grid, orthogonal=True, free_cells=BORDER_END_FREE / ROUTE_CELL)
     if not cells:
         return candidates[0]
     path = _simplify_orthogonal(cells, a, b)
-    best = min([path] + candidates, key=lambda p: (route_crossings(p, obstacles + borders, ends),
-                                                     route_too_close(p, borders, ends)))
-    return best
+    return min([path] + candidates, key=lambda p: (route_crossings(p, everything, ends), too_close(p)))
 
 
 # ------------------------------------------------------------- regions ---
@@ -2264,6 +2243,11 @@ def render_map(junctions, segments, pos, roads, points, border_data, border_node
                 f'fill="none" stroke-linecap="round" stroke-linejoin="round" opacity="0.85"/>')
 
     avoid_polys = road_polylines_list + river_sampled_polys
+    # borders keep their distance from everything, so they get their own grid
+    # with every line widened by BORDER_CLEARANCE
+    border_grid = ObstacleGrid()
+    for poly in avoid_polys:
+        border_grid.add(poly, margin=BORDER_CLEARANCE)
     border_svg_paths = []
     # borders must also never cross or run alongside EACH OTHER (only roads/
     # rivers were avoided before) - grows as each border line is routed, so
@@ -2323,11 +2307,11 @@ def render_map(junctions, segments, pos, roads, points, border_data, border_node
             ox, oy = origin
             tx, ty = target
             elbow = (tx, oy) if direction in ('E', 'W') else (ox, ty)
-            candidate = route_border(origin, target, avoid_polys, border_drawn_polys, route_grid,
+            candidate = route_border(origin, target, avoid_polys, border_drawn_polys, border_grid,
                                      first_try=[origin, elbow, target])
             tripoint_routes[id(seg)] = (candidate, origin)
             border_drawn_polys.append(candidate)
-            route_grid.add(candidate, margin=BORDER_CLEARANCE)
+            border_grid.add(candidate, margin=BORDER_CLEARANCE, hard=True)
 
     for seg in border_data.get('segments', []):
         a, b = border_node_pos.get(seg['from']), border_node_pos.get(seg['to'])
@@ -2338,9 +2322,9 @@ def render_map(junctions, segments, pos, roads, points, border_data, border_node
             if origin != a:
                 route = list(reversed(route))
         else:
-            route = route_border(a, b, avoid_polys, border_drawn_polys, route_grid)
+            route = route_border(a, b, avoid_polys, border_drawn_polys, border_grid)
             border_drawn_polys.append(route)
-            route_grid.add(route, margin=BORDER_CLEARANCE)
+            border_grid.add(route, margin=BORDER_CLEARANCE, hard=True)
         d = "M " + " L ".join(f"{X(x):.1f} {Y(y):.1f}" for x, y in route)
         border_svg_paths.append(f'<path d="{d}" stroke="#3A3A38" stroke-width="2" fill="none" '
                                  f'stroke-dasharray="6,4" stroke-linecap="round" opacity="0.7"/>')

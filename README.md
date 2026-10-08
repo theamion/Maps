@@ -50,9 +50,11 @@ generated page shows their data.
 - `networkx` (`mapmaking.py`)
 - `requests` (the two `osm_*` scripts; `serways_brands.py` only needs the
   standard library)
+- `cairosvg` (optional, only for `mapmaking.py --print-pdf`)
 
 ```bash
 pip install openpyxl networkx requests
+pip install cairosvg   # only for the PDF print version
 ```
 
 ## Quick start
@@ -74,8 +76,9 @@ Builds one HTML page with a map tab and one tab per route in `ROUTE_TABS`:
 - **Kaart:** the whole network as a schematic map that stays close to real
   geography. It has zoom, a GPS button, and toggles for bridge names (B),
   distances (Km), points of interest (★) and debug IDs (D).
-- **Route tabs:** currently Vught → Berwang, Vught → Serfaus via Lindau, and
-  the reverse of each. Each shows the route between two places as a "metro board" diagram, like the
+- **Route tabs:** one per entry in `ROUTE_TABS`, currently Vught ↔ Berwang,
+  Vught ↔ Serfaus via Lindau, Zeewolde ↔ Serfaus and Vught → Landal Wirfttal.
+  Each shows the route between two places as a "metro board" diagram, like the
   line diagrams on NS departure boards. The main route runs straight, and
   alternative branches fan out and rejoin it. Positions are ordinal hops, not
   geography. Buttons toggle fuel stations, bridges and tunnels (off, on, or on
@@ -123,6 +126,10 @@ seconds per route tab.
 | `--no-tube-primary` | off | Disable London-Underground-style angle snapping for Primary roads |
 | `--no-tube-secondary` | off | Disable angle snapping for Secondary roads |
 | `--tube-relaxed` | off | Allow a looser 16-angle set for tube-style bends (every 30°, plus the diagonals) instead of the strict Underground convention (multiples of 45° only) |
+| `--print-svg PATH` | off | Also write the print version of the map as an SVG to `PATH` (see "Print version") |
+| `--print-pdf PATH` | off | Also write the print version as a PDF to `PATH` (needs `cairosvg`) |
+| `--print-paper` | `A1` | Paper size of the print version: `A0`, `A1`, `A2` or `A3` |
+| `--print-orientation` | `landscape` | `landscape` or `portrait` |
 | **Route tab** | | |
 | `--from` / `--to` | `Vught` / `ROUTE_TABS` | Start and end junction names |
 | `--via` | none | Comma-separated junctions the main route must pass, in order |
@@ -133,6 +140,57 @@ seconds per route tab.
 | `--min-novel-km` | `3.0` | Minimum km of new road a branch must add |
 | `--orientation` | `vertical` | `vertical` or `horizontal` |
 | `--route-title` | `Route: <from> → <to>` | Route tab title |
+
+### Rivers and borders (Kaart only)
+
+Rivers and borders follow the rules of a real map:
+
+- A **border** never crosses a road except at a border crossing, never crosses
+  another border, and never runs alongside a border, road or river. Borders keep their angular look
+  (horizontal and vertical legs only).
+- A **river** never crosses a road except at a river bridge, a border except at
+  a shared point such as Tolkamer, or another river except at a river junction
+  (confluence or split).
+
+Each line first tries its classic shape: a gentle bow for a river, a Z or L for
+a border. If that breaks a rule, an A* search over a grid of the map finds a
+path around the roads, borders and rivers already drawn. For a river, that path
+is smoothed into a curve. Settings: `ROUTE_CELL`, `ROUTE_END_FREE`,
+`ROUTE_CROSS_COST`, `ROUTE_TURN_COST`, `BORDER_CLEARANCE` and `BORDER_END_FREE`
+in `mapmaking.py`.
+
+Borders also keep `BORDER_CLEARANCE` away from roads and rivers, so they don't
+run alongside them. The exception is right at their own endpoints
+(`BORDER_END_FREE`), because a border crossing sits on its road. Two borders
+never share a stretch, not even at a tripoint.
+
+A river can only stay continuous when every road it really passes under has a
+river bridge in the Points tab (category `brug (rivier)`, the right `Edge ID`)
+and that bridge is in the river's chain in `River Segments`. A missing or
+misplaced bridge forces the river across a road.
+
+### Print version (Kaart only)
+
+Besides `holidays.html`, `mapmaking.py` can write the Kaart as a single sheet
+for printing, like a classic paper road map:
+
+```bash
+python3 mapmaking.py --print-pdf kaart-A1.pdf                    # A1 landscape PDF
+python3 mapmaking.py --print-svg kaart-A0.svg --print-paper A0   # A0 landscape SVG
+```
+
+- The sheet has the physical paper size in millimetres (A1 = 841 × 594 mm in
+  landscape), so it prints at exactly that size. The map is scaled to fit the
+  sheet, keeping its proportions.
+- There are no zoom levels on paper, so everything that appears on screen at
+  some zoom level is always shown: fuel-station, bridge and tunnel names, brand
+  badges, points of interest and every marker tier. Distance labels, bridge
+  lengths and debug IDs are left out.
+- The legend is drawn into the bottom-left corner of the map itself.
+- `holidays.html` is still written as usual. The print options only add a file.
+- The PDF is converted from the same SVG with `cairosvg`. If you don't have it,
+  write the SVG and print or convert it with another program (for example
+  Inkscape).
 
 ### Which branches the route diagram shows
 
