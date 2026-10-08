@@ -2885,8 +2885,15 @@ ROUTE_TABS = [
     # both south-German chains tied to the Berwang/Serfaus main routes -
     # Wirfttal's route never reaches either, so each branch's own rejoin
     # node would never be on the main path and layout_routes() would
-    # crash looking it up. branches=[] opts this tab out of them.
-    dict(to="Wirfttal", branches=[]),
+    # crash looking it up. branches=[] opts this tab out instead of using
+    # them, but one explicit branch is forced in anyway: Kerensheide +
+    # Kaiserbaracke (33% local/country road, over MAX_LOCAL_SHARE, so the
+    # automatic search would never surface it on its own - confirmed by
+    # user they want to see it regardless). It's written as Vught -> ... ->
+    # Wirfttal (both ends already on the main path) rather than just
+    # Kerensheide -> Kaiserbaracke, so layout_routes() has a real node to
+    # rejoin at.
+    dict(to="Wirfttal", branches=[["Vught", "Kerensheide", "Kaiserbaracke", "Wirfttal"]]),
 ]
 
 HIERARCHY_WIDTH = {"Primary": 5.0, "Secondary": 4.0, "Connector": 3.0, "Local": 2.2}

@@ -3,3 +3,5 @@
 osm_*_cache.json
 serways_cache.json
 __pycache__/
+# generated print SVG/PDF exports (large binaries, regenerated on demand)
+print_output/
