@@ -3704,7 +3704,17 @@ def render_graph(junctions, seg_by_pair, points_by_edge, node_x, node_lane, edge
                 py_pt = y1 + frac * (y2 - y1)
                 line_angle = math.degrees(math.atan2(y2 - y1, x2 - x1))
                 if pt["category"] == "tankstation":
-                    if not fuel_side_visible(pt, ju if not reversed_dir else jv, jv if not reversed_dir else ju):
+                    # ju/jv already are the junctions in the direction this
+                    # edge is actually being drawn (u -> v) for this route,
+                    # whichever way that is relative to the segment's own
+                    # stored From/To - that's what "which side is the
+                    # right-hand one" has to be judged against, so no
+                    # reversed_dir conditional belongs here at all (there
+                    # used to be one, but it always ended up resolving back
+                    # to the segment's original stored direction either way,
+                    # silently hiding or misplacing one-sided stations on
+                    # any edge a route happens to traverse reversed)
+                    if not fuel_side_visible(pt, ju, jv):
                         continue
                     placer.add_box((px_pt - GRAPH_FUEL_HALF, py_pt - GRAPH_FUEL_HALF,
                                     px_pt + GRAPH_FUEL_HALF, py_pt + GRAPH_FUEL_HALF))
