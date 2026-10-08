@@ -3186,13 +3186,18 @@ ROUTE_TABS = [
     dict(to="Serfaus", via=SERFAUS_VIA, branches=SERFAUS_BRANCHES),
     {"from": "Berwang", "to": "Vught"},
     {"from": "Serfaus", "to": "Vught", "via": SERFAUS_VIA, "branches": SERFAUS_BRANCHES},
-    # SERFAUS_BRANCHES' Kerpen->...->Ulm/Elchingen chain isn't on the
-    # Zeewolde<->Serfaus main path (v6's updated OSRM distances changed
-    # which route is shortest through Germany), so its own first node
-    # would never be on the main path and layout_routes() would crash
-    # looking it up - same reasoning as Wirfttal's branches=[] below.
-    {"from": "Zeewolde", "to": "Serfaus", "via": SERFAUS_VIA, "branches": []},
-    {"from": "Serfaus", "to": "Zeewolde", "via": SERFAUS_VIA, "branches": []},
+    # only SERFAUS_BRANCHES' Kerpen->...->Ulm/Elchingen chain is dropped
+    # here: its own first node isn't on the Zeewolde<->Serfaus main path
+    # (v6's updated OSRM distances changed which route is shortest through
+    # Germany), so layout_routes() would crash looking it up - same
+    # reasoning as Wirfttal's branches=[] below. The other two chains keep
+    # their own endpoints on this main path (Weinsberg/Leonberg via the
+    # Walldorf-Karlsruhe-Leonberg stretch, Memmingen/Zams-Landeck Ost
+    # directly), so they're kept.
+    {"from": "Zeewolde", "to": "Serfaus", "via": SERFAUS_VIA,
+     "branches": [SERFAUS_BRANCHES[1], SERFAUS_BRANCHES[2]]},
+    {"from": "Serfaus", "to": "Zeewolde", "via": SERFAUS_VIA,
+     "branches": [SERFAUS_BRANCHES[1], SERFAUS_BRANCHES[2]]},
     # DEFAULT_BRANCHES (Kerpen...Ulm/Elchingen, Weinsberg...Leonberg) are
     # both south-German chains tied to the Berwang/Serfaus main routes -
     # Wirfttal's route never reaches either, so each branch's own rejoin
