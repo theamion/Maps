@@ -2803,6 +2803,8 @@ ROUTE_TABS = [
     dict(to="Serfaus", via=SERFAUS_VIA, branches=SERFAUS_BRANCHES),
     {"from": "Berwang", "to": "Vught"},
     {"from": "Serfaus", "to": "Vught", "via": SERFAUS_VIA, "branches": SERFAUS_BRANCHES},
+    {"from": "Zeewolde", "to": "Serfaus", "via": SERFAUS_VIA, "branches": SERFAUS_BRANCHES},
+    {"from": "Serfaus", "to": "Zeewolde", "via": SERFAUS_VIA, "branches": SERFAUS_BRANCHES},
 ]
 
 HIERARCHY_WIDTH = {"Primary": 5.0, "Secondary": 4.0, "Connector": 3.0, "Local": 2.2}
