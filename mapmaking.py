@@ -2805,6 +2805,12 @@ ROUTE_TABS = [
     {"from": "Serfaus", "to": "Vught", "via": SERFAUS_VIA, "branches": SERFAUS_BRANCHES},
     {"from": "Zeewolde", "to": "Serfaus", "via": SERFAUS_VIA, "branches": SERFAUS_BRANCHES},
     {"from": "Serfaus", "to": "Zeewolde", "via": SERFAUS_VIA, "branches": SERFAUS_BRANCHES},
+    # DEFAULT_BRANCHES (Kerpen...Ulm/Elchingen, Weinsberg...Leonberg) are
+    # both south-German chains tied to the Berwang/Serfaus main routes -
+    # Wirfttal's route never reaches either, so each branch's own rejoin
+    # node would never be on the main path and layout_routes() would
+    # crash looking it up. branches=[] opts this tab out of them.
+    dict(to="Wirfttal", branches=[]),
 ]
 
 HIERARCHY_WIDTH = {"Primary": 5.0, "Secondary": 4.0, "Connector": 3.0, "Local": 2.2}
