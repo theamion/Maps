@@ -83,10 +83,12 @@ FUEL_BRAND_COLOURS = [
     ("OK", "#F39200", "#1A1A1A", "OK"),
     ("Samba Oil", "#1A1A1A", "#FFC600", "Samba"),
     ("Tamoil", "#004B87", "#FFFFFF", "Tamoil"),
+    ("Agip", "#1A1A1A", "#FFC600", "Agip"),
 ]
 FOOD_BRAND_COLOURS = [
     ("McDonald's", "#DA291C", "#FFC72C", "M"),
     ("Burger King", "#D62300", "#FFFFFF", "BK"),
+    ("KFC", "#E4002B", "#FFFFFF", "KFC"),
     ("Starbucks", "#00704A", "#FFFFFF", "SB"),
     ("Subway", "#008938", "#FFC600", "Subway"),
     ("NORDSEE", "#0066B1", "#FFFFFF", "Nordsee"),

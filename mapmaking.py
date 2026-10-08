@@ -458,7 +458,7 @@ def marker_extent(sx, sy, ang, cat, sides, side, length_m):
                for s in (-1, 1) for t in (-1, 1)]
         reach = half_len + 0.8
     elif cat == 'autohof':
-        offset, radius = 9.0, 4.5
+        offset, radius = 4.8, 4.5
         ox, oy = sx + nx_ * side * offset, sy + ny_ * side * offset
         pts = [(ox - radius, oy - radius), (ox + radius, oy + radius)]
         reach = offset + radius + 0.8
@@ -1331,6 +1331,7 @@ def load_points_v2(wb, junctions):
             'food_brand': row[idx.get('Food brand(s)')] if 'Food brand(s)' in idx else None,
             'side_direction': row[idx.get('Side direction')] if 'Side direction' in idx else None,
             'exit_number': row[idx.get('Exit number')] if 'Exit number' in idx else None,
+            'hotel': row[idx.get('Hotel/Motel')] if 'Hotel/Motel' in idx else None,
         })
     return points
 
@@ -1416,7 +1417,7 @@ def point_at_fraction_on_polyline(poly, frac):
 
 # ------------------------------------------------------------- symbols ---
 
-MARKER_COLOUR = {'tankstation': '#A83232', 'autohof': '#1B5FA8',
+MARKER_COLOUR = {'tankstation': '#A83232', 'autohof': '#1B5FA8', 'autohof hotel': '#1A1A1A',
                   'brug (dal)': '#B0B0B0', 'brug (rivier)': '#185FA5',
                   'tunnel': '#5F5E5A', 'ecoduct': '#3B6D11', 'poi': '#3B6D11'}
 BAR_CATEGORIES = {'brug (dal)', 'brug (rivier)', 'tunnel', 'ecoduct'}
@@ -1505,12 +1506,16 @@ def fuel_marker_svg(cx, cy, angle_deg, sides, colour, side=1, length=10, base=4.
     return f'<polygon points="{s}" fill="{colour}" stroke="white" stroke-width="0.5"/>'
 
 
-def autohof_marker_svg(cx, cy, angle_deg, colour, side=1, offset=9, radius=4.5):
+def autohof_marker_svg(cx, cy, angle_deg, colour, side=1, offset=4.8, radius=4.5):
     """A regular hexagon, offset to the given side of the road the same way
     fuel_marker_svg's triangle tip is - an Autohof is an independently-run
     service area, not necessarily tied to one fuel brand, so it gets its
-    own shape (and MARKER_COLOUR's own blue) instead of sharing the
-    tankstation's directional triangle/diamond."""
+    own shape (and MARKER_COLOUR's own blue, or black with an on-site
+    hotel/motel) instead of sharing the tankstation's directional
+    triangle/diamond. `offset` is kept just over `radius` so the hexagon's
+    near edge sits flush against the road line instead of floating free of
+    it - unlike the triangle marker, a hexagon has no edge of its own that
+    can be pinned exactly onto the line, so this is the closest snap."""
     a = math.radians(angle_deg); perp = a + math.pi / 2
     ox, oy = cx + math.cos(perp) * side * offset, cy + math.sin(perp) * side * offset
     pts = [(ox + math.cos(math.radians(60 * i - 30)) * radius,
@@ -1885,6 +1890,7 @@ def build_legend_html():
         (junction_circle_svg(0, 0, 'Junction', 'Small'), 'Kleine aansluiting'),
         (fuel_marker_svg(0, 0, 90, 2, MARKER_COLOUR['tankstation'], length=7, base=7), 'Tankstation'),
         (autohof_marker_svg(0, 0, 90, MARKER_COLOUR['autohof'], side=1, offset=0, radius=6), 'Autohof (afritnummer)'),
+        (autohof_marker_svg(0, 0, 90, MARKER_COLOUR['autohof hotel'], side=1, offset=0, radius=6), 'Autohof met hotel/motel'),
         (bar_svg(0, 0, 90, MARKER_COLOUR['brug (dal)'], length_m=500, bar_len=15), 'Brug'),
         (bar_svg(0, 0, 90, MARKER_COLOUR['tunnel'], length_m=500, bar_len=15), 'Tunnel'),
         (star_svg(0, 0, 7, 'poi-star'), 'Bezienswaardigheid'),
@@ -2284,7 +2290,8 @@ def render_map(junctions, segments, pos, roads, points, border_data, border_node
                     parts.append(f'<g class="{tier_class}">{marker}</g>' if tier_class else marker)
                 elif cat == 'autohof':
                     side = one_sided_marker_side(p, fj, tj) if p['sides'] == 1 else 1
-                    markers = autohof_marker_svg(sx, sy, ang, MARKER_COLOUR['autohof'], side=side)
+                    colour = MARKER_COLOUR['autohof hotel'] if p.get('hotel') else MARKER_COLOUR['autohof']
+                    markers = autohof_marker_svg(sx, sy, ang, colour, side=side)
                     parts.append(f'<g class="{tier_class}">{markers}</g>' if tier_class else markers)
                 elif cat == 'tankstation':
                     info = point_badge_info.get(p['id'])
