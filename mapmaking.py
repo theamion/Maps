@@ -1963,7 +1963,10 @@ def render_map(junctions, segments, pos, roads, points, border_data, border_node
             a, b = river_data['pos'].get(seg['from']), river_data['pos'].get(seg['to'])
             if not a or not b:
                 continue
-            control = river_bow_control(a, b, road_polylines_list)
+            # rivers must also never cross EACH OTHER except where they
+            # actually meet (a shared River Junction endpoint - confluence
+            # or split), so each new river also avoids every one already drawn
+            control = river_bow_control(a, b, road_polylines_list + river_sampled_polys)
             sampled = sample_quadratic_bezier(a, control, b)
             river_sampled_polys.append(sampled)
             river_svg_paths.append(
@@ -1973,6 +1976,12 @@ def render_map(junctions, segments, pos, roads, points, border_data, border_node
 
     avoid_polys = road_polylines_list + river_sampled_polys
     border_svg_paths = []
+    # borders must also never cross or run alongside EACH OTHER (only roads/
+    # rivers were avoided before) - grows as each border line is routed, so
+    # later ones avoid every line already drawn; only the segment's own two
+    # endpoints (skip_near) are allowed to touch, e.g. a shared border-
+    # crossing junction or tripoint two lines legitimately meet at.
+    border_drawn_polys = []
     tripoint_ids = {bnid for bnid, info in border_data.get('info', {}).items() if info['type'] == 'Tripoint'}
 
     # Group every segment touching a tripoint by that tripoint, so all of
@@ -2026,9 +2035,11 @@ def render_map(junctions, segments, pos, roads, points, border_data, border_node
             tx, ty = target
             elbow = (tx, oy) if direction in ('E', 'W') else (ox, ty)
             candidate = [origin, elbow, target]
-            if path_crosses_roads(candidate, avoid_polys, [origin, target]):
-                candidate = orthogonal_route(origin, target, road_polylines=avoid_polys, skip_near=[origin, target])
+            obstacles = avoid_polys + border_drawn_polys
+            if path_crosses_roads(candidate, obstacles, [origin, target]):
+                candidate = orthogonal_route(origin, target, road_polylines=obstacles, skip_near=[origin, target])
             tripoint_routes[id(seg)] = (candidate, origin)
+            border_drawn_polys.append(candidate)
 
     for seg in border_data.get('segments', []):
         a, b = border_node_pos.get(seg['from']), border_node_pos.get(seg['to'])
@@ -2039,7 +2050,8 @@ def render_map(junctions, segments, pos, roads, points, border_data, border_node
             if origin != a:
                 route = list(reversed(route))
         else:
-            route = orthogonal_route(a, b, road_polylines=avoid_polys, skip_near=[a, b])
+            route = orthogonal_route(a, b, road_polylines=avoid_polys + border_drawn_polys, skip_near=[a, b])
+            border_drawn_polys.append(route)
         d = "M " + " L ".join(f"{X(x):.1f} {Y(y):.1f}" for x, y in route)
         border_svg_paths.append(f'<path d="{d}" stroke="#3A3A38" stroke-width="2" fill="none" '
                                  f'stroke-dasharray="6,4" stroke-linecap="round" opacity="0.7"/>')
@@ -2403,8 +2415,11 @@ def render_map(junctions, segments, pos, roads, points, border_data, border_node
 
 # ------------------------------------------------------------- generate ---
 
-def build_map(xlsx_path=DEFAULT_XLSX, title="Geographic Spine Map", tube_style_hierarchies=None, tube_angles=None):
-    """Builds the geography-preserving map page. Returns (html, stats)."""
+def _build_map_core(xlsx_path=DEFAULT_XLSX, title="Geographic Spine Map", tube_style_hierarchies=None, tube_angles=None):
+    """Shared setup for the geography-preserving map: projects junctions,
+    builds roads/points/borders, and renders the SVG. Returns a dict
+    consumed by build_map() (interactive HTML) and build_print_svg()
+    (standalone print SVG), so both stay based on the same render."""
     if tube_style_hierarchies is None:
         tube_style_hierarchies = {'Primary', 'Secondary'}  # tube-style is now the default
     wb, junctions, roads, segments = load_all(xlsx_path)
@@ -2476,6 +2491,73 @@ def build_map(xlsx_path=DEFAULT_XLSX, title="Geographic Spine Map", tube_style_h
     )
     segments_geo_json = json.dumps(segments_geo)
     legend_html = build_legend_html()
+    stats = {
+        'junctions': len(junctions), 'segments': len(segments), 'points': len(points),
+        'roads': len(road_colours), 'borders': len(border_data.get('segments', [])) if border_data else 0,
+        'primary_moved_to_cap': len(moved_primary), 'secondary_moved_to_cap': len(moved_secondary),
+        'ambiguous_border_crossings': ambiguous,
+        'width': width, 'height': height, 'pois': len(pois), 'point_labels': label_stats,
+    }
+    return {
+        'svg': svg, 'legend_html': legend_html, 'segments_geo_json': segments_geo_json,
+        'width': width, 'height': height, 'title': title, 'stats': stats,
+    }
+
+
+# physical ISO paper sizes in mm, portrait (width, height); PRINT_FORCE_VISIBLE_CSS
+# makes every zoom-gated label/badge/marker-tier from the interactive page (see
+# build_map()'s <style>) show unconditionally, since a print sheet has no zoom
+# levels - everything that would ever be shown on screen should be on the page.
+PAPER_SIZES_MM = {'A0': (841, 1189), 'A1': (594, 841), 'A2': (420, 594), 'A3': (297, 420)}
+PRINT_FORCE_VISIBLE_CSS = (
+    '.zoom-point-label, .brand-badge, .poi, .bridge-label,'
+    ' .marker-tier-1, .marker-tier-2, .marker-tier-3, .marker-tier-4 { display: block; }'
+    ' .debug-label, .bridge-length-label, .dist-label { display: none; }'
+)
+
+
+def build_print_svg(xlsx_path=DEFAULT_XLSX, title="Geographic Spine Map", tube_style_hierarchies=None,
+                     tube_angles=None, paper='A1', orientation='landscape'):
+    """Builds a standalone, fully-detailed print SVG of the geography-preserving
+    map: every zoom-gated element forced visible, the legend composited into
+    the drawing itself (not a floating HTML overlay), sized to the given ISO
+    paper size (physical mm) so it prints, or converts to PDF, at that exact
+    size with the full map visible at once - like a traditional printed map."""
+    core = _build_map_core(xlsx_path, title, tube_style_hierarchies, tube_angles)
+    width, height = core['width'], core['height']
+
+    pw_mm, ph_mm = PAPER_SIZES_MM[paper]
+    if orientation == 'landscape':
+        pw_mm, ph_mm = ph_mm, pw_mm
+
+    # the legend is its own small self-contained <svg ...>...</svg> (see
+    # build_legend_html()); nest it as a child <svg> positioned in the
+    # bottom-left corner, in the main drawing's own coordinate units (same
+    # ~210-unit width it's drawn at for on-screen display at 1:1 zoom, so it
+    # keeps the same proportions relative to the map as the interactive page)
+    legend_svg_match = re.search(r'(<svg\b[^>]*>)(.*)(</svg>)', core['legend_html'], re.S)
+    legend_h_match = re.search(r'viewBox="0 0 210 ([\d.]+)"', core['legend_html'])
+    legend_h = float(legend_h_match.group(1)) if legend_h_match else 0
+    legend_pad = 20
+    legend_svg = (f'<svg x="{legend_pad}" y="{height - legend_h - legend_pad:.1f}"'
+                  + legend_svg_match.group(1)[4:] + legend_svg_match.group(2) + legend_svg_match.group(3)) \
+        if legend_svg_match else ''
+
+    svg_open, _, rest = core['svg'].partition('\n')
+    print_svg = (
+        f'<svg width="{pw_mm}mm" height="{ph_mm}mm" viewBox="0 0 {width:.0f} {height:.0f}" '
+        f'preserveAspectRatio="xMidYMid meet" xmlns="http://www.w3.org/2000/svg" font-family="Arial, sans-serif">\n'
+        f'<style>{PRINT_FORCE_VISIBLE_CSS}</style>\n'
+        f'{legend_svg}\n'
+        f'{rest}'
+    )
+    return print_svg, core['stats']
+
+
+def build_map(xlsx_path=DEFAULT_XLSX, title="Geographic Spine Map", tube_style_hierarchies=None, tube_angles=None):
+    """Builds the geography-preserving, interactive map page. Returns (html, stats)."""
+    core = _build_map_core(xlsx_path, title, tube_style_hierarchies, tube_angles)
+    svg, legend_html, segments_geo_json = core['svg'], core['legend_html'], core['segments_geo_json']
 
     html = f'''<!DOCTYPE html>
 <html><head><meta charset="utf-8"><title>{title}</title>
@@ -2760,13 +2842,7 @@ def build_map(xlsx_path=DEFAULT_XLSX, title="Geographic Spine Map", tube_style_h
 </script>
 </body></html>'''
 
-    return html, {
-        'junctions': len(junctions), 'segments': len(segments), 'points': len(points),
-        'roads': len(road_colours), 'borders': len(border_data.get('segments', [])) if border_data else 0,
-        'primary_moved_to_cap': len(moved_primary), 'secondary_moved_to_cap': len(moved_secondary),
-        'ambiguous_border_crossings': ambiguous,
-        'width': width, 'height': height, 'pois': len(pois), 'point_labels': label_stats,
-    }
+    return html, core['stats']
 
 
 # =====================================================================
@@ -4303,6 +4379,15 @@ def main():
                     help='allow a looser 16-angle set (TUBE_ANGLES_RELAXED: every 30 degrees, plus the diagonals) '
                          'for tube-style bends, instead of the default strict London Underground convention '
                          '(TUBE_ANGLES_STRICT: only multiples of 45 degrees)')
+    mg.add_argument('--print-svg', default=None,
+                    help='also write a standalone, fully-detailed print SVG of the map (every zoom-gated '
+                         'label/badge forced visible, legend baked in) sized to --print-paper, to this path')
+    mg.add_argument('--print-pdf', default=None,
+                    help='also write the same print rendering as a PDF (requires the cairosvg package) to this path')
+    mg.add_argument('--print-paper', default='A1', choices=sorted(['A0', 'A1', 'A2', 'A3']),
+                    help='ISO physical paper size for --print-svg/--print-pdf (default A1)')
+    mg.add_argument('--print-orientation', choices=['portrait', 'landscape'], default='landscape',
+                    help='sheet orientation for --print-svg/--print-pdf (default landscape)')
 
     rg = ap.add_argument_group('route tabs',
                                'without --to/--via/--branch/--route-title every route in ROUTE_TABS gets a tab; '
@@ -4336,6 +4421,17 @@ def main():
     tube_angles = TUBE_ANGLES_RELAXED if args.tube_relaxed else None
     map_html, map_stats = build_map(xlsx_path=args.xlsx, title=args.map_title, tube_angles=tube_angles,
                                     tube_style_hierarchies=tube_style)
+
+    if args.print_svg or args.print_pdf:
+        print_svg, _print_stats = build_print_svg(
+            xlsx_path=args.xlsx, title=args.map_title, tube_angles=tube_angles,
+            tube_style_hierarchies=tube_style, paper=args.print_paper, orientation=args.print_orientation)
+        if args.print_svg:
+            with open(args.print_svg, 'w', encoding='utf-8') as f:
+                f.write(print_svg)
+        if args.print_pdf:
+            import cairosvg
+            cairosvg.svg2pdf(bytestring=print_svg.encode('utf-8'), write_to=args.print_pdf)
 
     if args.end_name or args.via or args.branch is not None or args.route_title:
         tabs = [dict(to=args.end_name or DEFAULT_TO,
