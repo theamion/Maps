@@ -3165,7 +3165,7 @@ def layout_routes(accepted):
 
     untangle_lanes(runs, node_x, node_lane, edges_drawn)
     enforce_nesting(runs, run_parent, node_x, node_lane, edges_drawn)
-    rebase_wide_runs(runs, run_parent, run_rejoin, node_x, node_lane, edges_drawn, destination=main_path[-1])
+    rebase_wide_runs(runs, run_parent, run_rejoin, node_x, node_lane, edges_drawn, main_path=main_path)
     compact_x_gaps(node_x)
     return node_x, node_lane, edges_drawn
 
@@ -3284,7 +3284,7 @@ def enforce_nesting(runs, run_parent, node_x, node_lane, edges_drawn, passes=6):
             break
 
 
-def rebase_wide_runs(runs, run_parent, run_rejoin, node_x, node_lane, edges_drawn, destination=None, passes=3):
+def rebase_wide_runs(runs, run_parent, run_rejoin, node_x, node_lane, edges_drawn, main_path=None, passes=3):
     """Even with a correct nesting invariant, no side/depth assignment can
     make the diagram fully crossing-free if its x-order itself is
     contradictory: treating "does edge A's hop-range properly interleave
@@ -3312,12 +3312,17 @@ def rebase_wide_runs(runs, run_parent, run_rejoin, node_x, node_lane, edges_draw
     so this can never make things worse, only trade an unsolvable lane
     problem for a slightly wider diagram.
 
-    `destination` (the route's own endpoint) must stay the single highest
-    x in the whole diagram throughout - the page reads top to bottom as
-    one linear trip, so the destination has to stay the lowest point on
-    it. Since a rebased run always moves to fresh space past the current
-    max, it's pushed past the destination too; whenever that happens, the
-    destination is pushed out further still, so it's never overtaken.
+    Any main-path (trunk) node a rebased run's new suffix would reach or
+    pass - not just the route's own final destination, but equally a
+    junction the trunk merely passes through on its way, like Zaarderheiken
+    sitting between Moers and Vught - must stay strictly ahead of it: the
+    trunk is the spine the whole page reads top to bottom against, so a
+    branch is never allowed to read as arriving at a trunk junction before
+    the trunk itself does. Whenever a push would overtake one, that trunk
+    node and everything after it on the trunk are shifted forward by the
+    same amount first, keeping their own relative spacing untouched -
+    exactly the destination's old special case, just generalised to any
+    point along the trunk instead of only the very last one.
 
     A run can be long (a leg alternate that rediscovers most of the main
     route, e.g. Köln-Ost...Paalgraven on the way back from an away branch)
@@ -3331,13 +3336,26 @@ def rebase_wide_runs(runs, run_parent, run_rejoin, node_x, node_lane, edges_draw
     keeps its original, already-fine interpolated position."""
     edges = list(edges_drawn.values())
     node_to_run = {n: run for run in runs for n in run}
+    trunk_index = {node: i for i, node in enumerate(main_path)} if main_path else {}
 
     def crossings():
         return count_crossings(node_x, node_lane, edges)
 
+    def push_trunk_past(trunk_node, x_threshold):
+        """Make sure trunk_node (a main_path junction) stays strictly ahead
+        of x_threshold, carrying the rest of the trunk after it along by
+        the same delta so the trunk's own internal order never breaks."""
+        idx = trunk_index[trunk_node]
+        if node_x[trunk_node] > x_threshold:
+            return
+        delta = (x_threshold + 1.0) - node_x[trunk_node]
+        for later in main_path[idx:]:
+            node_x[later] += delta
+
     best = crossings()
     if best == 0:
         return
+    pushed_run_ids = set()
 
     for _ in range(passes):
         pairs = count_crossings(node_x, node_lane, edges, return_pairs=True)
@@ -3373,9 +3391,9 @@ def rebase_wide_runs(runs, run_parent, run_rejoin, node_x, node_lane, edges_draw
             suffix = run[split:]
             if not suffix:
                 continue
-            saved_x = {n: node_x[n] for n in run}
-            if destination is not None:
-                saved_x[destination] = node_x[destination]
+            rejoin_node = run_rejoin.get(run[0])
+            rejoin_is_trunk = rejoin_node in trunk_index
+            saved_x = dict(node_x) if rejoin_is_trunk else {n: node_x[n] for n in run}
             saved_lane = dict(node_lane)
 
             targets = []
@@ -3385,29 +3403,95 @@ def rebase_wide_runs(runs, run_parent, run_rejoin, node_x, node_lane, edges_draw
             global_target = max(node_x.values()) + 1.0
             if not targets or abs(global_target - targets[0]) > 1e-6:
                 targets.append(global_target)  # fallback if the local push wasn't enough
+            if not rejoin_is_trunk and rejoin_node is not None:
+                # a run's own rejoin, when it's itself just another run's
+                # interior node rather than a trunk junction, has no trunk
+                # to cascade-push - overshooting past it would make the
+                # suffix run backwards into it instead of smoothly arriving.
+                # Drop any target that doesn't leave room for the suffix.
+                rejoin_x = node_x[rejoin_node]
+                targets = [t for t in targets if t + len(suffix) < rejoin_x]
+
+            moved_set = set(suffix)
+
+            def breaks_other_run():
+                # a node in this run can itself be the attach or rejoin
+                # point of a completely different, unrelated run (two
+                # alternate paths sharing one physical junction) - moving
+                # it without checking can leave that other run pointing
+                # backwards at its own attach/rejoin, the same fault as
+                # overshooting this run's own rejoin, just one step
+                # removed. Reject the candidate rather than draw that.
+                for other in runs:
+                    if other is run:
+                        continue
+                    op, orj = run_parent.get(other[0]), run_rejoin.get(other[0])
+                    if op is None or orj is None:
+                        continue
+                    if (op in moved_set or orj in moved_set) and node_x[op] >= node_x[orj]:
+                        return True
+                return False
 
             moved = False
             for new_start in targets:
                 for k, node in enumerate(suffix, start=1):
                     node_x[node] = new_start + k
-                if destination is not None:
-                    run_end = new_start + len(suffix)
-                    if node_x[destination] <= run_end:
-                        node_x[destination] = run_end + 1.0
+                if rejoin_is_trunk:
+                    push_trunk_past(rejoin_node, new_start + len(suffix))
 
                 untangle_lanes(runs, node_x, node_lane, edges_drawn)
                 enforce_nesting(runs, run_parent, node_x, node_lane, edges_drawn)
                 c = crossings()
-                if c < best:
+                if c < best and not breaks_other_run():
                     best, moved = c, True
                     break
                 node_x.update(saved_x)
                 node_lane.clear()
                 node_lane.update(saved_lane)
             if moved:
+                pushed_run_ids.add(id(run))
                 improved = True
                 break  # positions shifted - re-derive which edges still cross
         if not improved:
+            break
+
+    if pushed_run_ids:
+        _resync_dependent_runs(runs, run_parent, run_rejoin, node_x, skip_ids=pushed_run_ids)
+        untangle_lanes(runs, node_x, node_lane, edges_drawn)
+        enforce_nesting(runs, run_parent, node_x, node_lane, edges_drawn)
+
+
+def _resync_dependent_runs(runs, run_parent, run_rejoin, node_x, skip_ids=(), passes=None):
+    """A run's interior nodes are only ever interpolated between its attach
+    and rejoin x ONCE, when first laid out. If a LATER rebase moves that
+    attach or rejoin node itself (because it's also the interior node of
+    some other, unrelated run that needed to clear a crossing), nothing
+    updates this run to match - it keeps pointing at the junction's old
+    position, so the edge connecting them is drawn from the junction's new
+    spot back to the run's stale one, often running backwards up the page
+    for no topological reason at all. Re-interpolates every run whose
+    attach or rejoin has moved since its own nodes were placed, repeating
+    (a moved run can itself be another run's attach/rejoin) until nothing
+    changes."""
+    if passes is None:
+        passes = len(runs) + 2
+    for _ in range(passes):
+        changed = False
+        for run in runs:
+            if id(run) in skip_ids:
+                continue
+            parent = run_parent.get(run[0])
+            rejoin = run_rejoin.get(run[0])
+            if parent is None or rejoin is None:
+                continue
+            x_attach, x_rejoin = node_x[parent], node_x[rejoin]
+            hop_count = len(run) + 1
+            for k, node in enumerate(run, start=1):
+                new_x = x_attach + (k / hop_count) * (x_rejoin - x_attach)
+                if abs(node_x[node] - new_x) > 1e-9:
+                    node_x[node] = new_x
+                    changed = True
+        if not changed:
             break
 
 
@@ -3698,18 +3782,37 @@ def render_graph(junctions, seg_by_pair, points_by_edge, node_x, node_lane, edge
     # label texts and sizes
     items = []
     for x, y, line_angle, pt in pending_points:
+        badge_entries = []
         if pt["category"] == "poi":
             text = pt["name"]
             reach = GRAPH_POI_R + 0.5
         elif pt["category"] == "tankstation":
-            text = (pt["name"] or "") + (f' [{pt["brand"]}]' if pt.get("brand") else "")
+            text = pt["name"] or ""
             reach = GRAPH_FUEL_HALF + 0.5
+            # fuel + food/amenity badges, echoing the map tab's own badge
+            # row - a 'sided' station (different brand per physical side)
+            # has no equivalent here (one schematic line, not two
+            # carriageways), so every brand it names is simply merged into
+            # one row, same as the map tab does when it can't resolve sides
+            mode, data = map_icons.brand_badge_entries(pt.get("brand"), pt.get("food_brand"), pt.get("facilities"))
+            if mode == "single":
+                badge_entries = data
+            else:
+                seen, merged = set(), []
+                for lst in data.values():
+                    for e in lst:
+                        if e["code"] not in seen:
+                            seen.add(e["code"]); merged.append(e)
+                badge_entries = merged
         else:
             text = (pt["name"] or "") + (f" ({pt['length_m']}m)" if pt.get("length_m") else "")
             reach = GRAPH_BRIDGE_R + 0.5
         bold = 1.08 if pt["category"] == "poi" else 1.0
-        items.append(dict(x=x, y=y, line_angle=line_angle, pt=pt, reach=reach,
-                          w=text_width(text, GRAPH_POINT_FONT) * bold, h=GRAPH_POINT_FONT * LINE_HEIGHT,
+        badge_w, badge_h, _widths = map_icons.badge_row_metrics(badge_entries)
+        name_w = text_width(text, GRAPH_POINT_FONT) * bold
+        name_h = GRAPH_POINT_FONT * LINE_HEIGHT
+        items.append(dict(x=x, y=y, line_angle=line_angle, pt=pt, reach=reach, badges=badge_entries,
+                          w=max(name_w, badge_w), h=name_h + badge_h, name_h=name_h,
                           ignore=(x - reach, y - reach, x + reach, y + reach)))
 
     # vertical diagram: ordered columns beside each line - on the left first
@@ -3737,7 +3840,7 @@ def render_graph(junctions, seg_by_pair, points_by_edge, node_x, node_lane, edge
         if it["pt"]["category"] == "poi":
             svg_pois.append(_poi_marker(it["x"], it["y"], it["pt"], box, leader))
         elif it["pt"]["category"] == "tankstation":
-            svg_points.append(_fuel_marker(it["x"], it["y"], it["pt"], box, leader))
+            svg_points.append(_fuel_marker(it["x"], it["y"], it["pt"], box, leader, it["badges"], it["name_h"]))
         else:
             svg_points.append(_bridge_marker(it["x"], it["y"], it["pt"], box, leader))
 
@@ -3815,9 +3918,8 @@ def _leader(x, y, box, leader):
     return f'<line class="leader" x1="0" y1="0" x2="{ex - x:.1f}" y2="{ey - y:.1f}"/>'
 
 
-def _fuel_marker(x, y, pt, box, leader):
+def _fuel_marker(x, y, pt, box, leader, badges=None, name_h=None):
     label = _esc(pt["name"])
-    brand = f' <tspan class="brand">[{_esc(pt["brand"])}]</tspan>' if pt.get("brand") else ""
     lx, ly, anchor = _label_pos(x, y, box)
     # the fuel brand's real icon where we have one on file, else a
     # brand-coloured square (falls back to neutral orange for an unknown
@@ -3831,10 +3933,19 @@ def _fuel_marker(x, y, pt, box, leader):
     else:
         marker_svg = (f'<rect x="{-half}" y="{-half}" width="{2*half}" height="{2*half}" '
                       f'fill="{fill}" stroke="#7a4400" stroke-width="1"/>')
+    # fuel + food/amenity badges (real logos where we have one on file, a
+    # coloured chip otherwise) sit left-aligned right under the name, same
+    # as the map tab - the name itself no longer repeats the brand as text
+    badge_svg = ""
+    if badges:
+        badge_left = box[0] - x
+        badge_top = box[1] - y + (name_h if name_h is not None else GRAPH_POINT_FONT * LINE_HEIGHT)
+        badge_svg = map_icons.badge_row_svg(badges, badge_left, badge_top)
     return (
         f'<g class="fuel-marker" transform="translate({x:.1f} {y:.1f})">'
         + _leader(x, y, box, leader) + marker_svg +
-        f'<text class="fuel-label zoom-label" x="{lx:.1f}" y="{ly:.1f}" text-anchor="{anchor}">{label}{brand}</text>'
+        f'<text class="fuel-label zoom-label" x="{lx:.1f}" y="{ly:.1f}" text-anchor="{anchor}">{label}</text>'
+        + badge_svg +
         f'</g>'
     )
 
