@@ -2726,6 +2726,7 @@ def _build_map_core(xlsx_path=DEFAULT_XLSX, title="Geographic Spine Map", tube_s
                 x = (lon - centre_lon) * cos_lat * UNIT_PER_DEGREE
                 y = (centre_lat - lat) * UNIT_PER_DEGREE
                 river_pos[rid] = (x, y)
+        river_junction_ids = set(river_pos)  # before point positions are merged in below
         polylines_tmp = build_road_polylines(junctions, segments, pos, roads)
         pts_by_edge = defaultdict(list)
         for p in points:
@@ -2741,10 +2742,32 @@ def _build_map_core(xlsx_path=DEFAULT_XLSX, title="Geographic Spine Map", tube_s
         wsrs = wb['River Segments']
         rs_header = [c.value for c in wsrs[1]]
         sidx = {h: i for i, h in enumerate(rs_header)}
+        point_by_id = {p['id']: p for p in points}
+        # a river chain may only pass through its own River Junctions and
+        # 'brug (rivier)' points - anything else (a mistyped ID, or a point
+        # that merely happens to share a name with the river, e.g. a
+        # tankstation called "Mosel") must fail the build loudly, not draw
+        # a silently wrong detour or get silently skipped.
+        bad_rows = []
         for row in wsrs.iter_rows(min_row=2, values_only=True):
             fid, tid = row[sidx.get('From ID', 0)], row[sidx.get('To ID', 2)]
-            if fid and tid:
-                river_segs.append({'from': fid, 'to': tid})
+            river = row[sidx.get('River')]
+            if not fid or not tid:
+                continue
+            for node_id in (fid, tid):
+                if node_id in river_junction_ids:
+                    continue
+                pt = point_by_id.get(node_id)
+                if pt is None:
+                    bad_rows.append(f"  {fid} -> {tid} ({river}): {node_id} is not a known "
+                                     f"Point ID or River Junction ID")
+                elif pt['category'] != 'brug (rivier)':
+                    bad_rows.append(f"  {fid} -> {tid} ({river}): {node_id} \"{pt['name']}\" "
+                                     f"has Category \"{pt['category']}\", not \"brug (rivier)\"")
+            river_segs.append({'from': fid, 'to': tid})
+        if bad_rows:
+            raise SystemExit("River Segments references point(s) that aren't river bridges "
+                              "or River Junctions:\n" + "\n".join(bad_rows))
 
     border_node_pos, border_data = build_border_polylines(wb, pos, junctions, river_pos)
     # fill any still-unresolved dedicated border-only nodes (tripoints) from their own lat/lon
