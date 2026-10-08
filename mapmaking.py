@@ -3271,6 +3271,7 @@ def load_data(xlsx_path):
     from_start_col = pts_header.index("OSM DistanceFromStart (km)") if "OSM DistanceFromStart (km)" in pts_header else None
     food_brand_col = pts_header.index("Food brand(s)") if "Food brand(s)" in pts_header else None
     exit_number_col = pts_header.index("Exit number") if "Exit number" in pts_header else None
+    side_direction_col = pts_header.index("Side direction") if "Side direction" in pts_header else None
     for row in wb["Points"].iter_rows(min_row=2, values_only=True):
         if not row[0] or not row[9]:
             continue
@@ -3286,6 +3287,7 @@ def load_data(xlsx_path):
             food_brand=row[food_brand_col] if food_brand_col is not None else None,
             from_start_km=row[from_start_col] if from_start_col is not None else None,
             exit_number=row[exit_number_col] if exit_number_col is not None else None,
+            side_direction=row[side_direction_col] if side_direction_col is not None else None,
         ))
     for eid in points_by_edge:
         points_by_edge[eid].sort(key=lambda p: (p["pos"], p["order"] or 0))
@@ -3973,20 +3975,22 @@ def count_crossings(node_x, node_lane, edges, trunk_weight=1, return_pairs=False
 
 def fuel_side_visible(point, from_j, to_j):
     """Direction-aware visibility for one-sided fuel stations: only show a
-    one-sided station if it lies on the right-hand side of the direction
-    of travel from from_j to to_j (right-hand traffic countries)."""
+    one-sided station if it's on the right-hand side of travel from from_j
+    to to_j (right-hand traffic countries).
+
+    Delegates to one_sided_marker_side() - the same side rule the Kaart
+    tab's icon placement already uses (the Points tab's 'Side direction'
+    column when the point has one, else the point's own lat/lon) - so the
+    Kaart marker and a route diagram can never disagree about which side a
+    station is on, and an explicit compass side always wins over the
+    point's own coordinate, not just when that coordinate is ambiguous (a
+    coordinate interpolated onto the from/to line, as can happen for a
+    station added from a brand survey rather than individually geocoded,
+    gives this function's own cross-product a confidently WRONG sign just
+    as easily as a near-zero one)."""
     if point["sides"] != 1:
         return True
-    if point["lat"] is None or point["lon"] is None:
-        return True
-    dx = to_j["lon"] - from_j["lon"]
-    dy = to_j["lat"] - from_j["lat"]
-    # right-hand normal of travel direction (rotate -90deg in lon(x)/lat(y) plane)
-    rnx, rny = dy, -dx
-    vx = point["lon"] - from_j["lon"]
-    vy = point["lat"] - from_j["lat"]
-    side_val = vx * rnx + vy * rny
-    return side_val > 0
+    return one_sided_marker_side(point, from_j, to_j) > 0
 
 
 def render_graph(junctions, seg_by_pair, points_by_edge, node_x, node_lane, edges_drawn, source, target,
