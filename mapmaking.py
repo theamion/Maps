@@ -3194,7 +3194,9 @@ ROUTE_TABS = [
 
 HIERARCHY_WIDTH = {"Primary": 5.0, "Secondary": 4.0, "Connector": 3.0, "Local": 2.2}
 TIER_RADIUS = {"Small": 5.0, "Medium": 8.0, "Large": 12.0}
-LANE_HEIGHT = 90.0   # px per lane, downward
+LANE_HEIGHT = 130.0  # px per lane, downward (sideways, in vertical orientation) -
+                      # wider than STEP_X's hop spacing so junction names, segment
+                      # distances and the cumulative-km labels all have room
 STEP_X = 110.0       # px per ordinal hop
 MARGIN_PX = 100   # extra room around the route canvas, so the floating
                   # controls panel has blank space to sit over even when
