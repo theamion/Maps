@@ -41,7 +41,7 @@ So for every point this script:
 
 It only ADDS "OSM ..." columns to the Points tab - PositionOnEdge and every
 other existing column are left untouched. By default it reads and writes
-junctions_topology_v5.xlsx next to this script (in place); re-running
+junctions_topology_v6.xlsx next to this script (in place); re-running
 refills those columns instead of adding a second set. mapmaking.py uses
 'OSM DistanceFromStart (km)' for the distances between fuel stations in
 the route diagram.
@@ -79,7 +79,7 @@ import requests
 from openpyxl import load_workbook
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
-DEFAULT_XLSX = os.path.join(SCRIPT_DIR, "junctions_topology_v5.xlsx")
+DEFAULT_XLSX = os.path.join(SCRIPT_DIR, "junctions_topology_v6.xlsx")
 DEFAULT_CACHE = os.path.join(SCRIPT_DIR, "osm_point_leg_cache.json")
 RETRY_STATUSES = ("ERROR", "SEGMENT_UNREACHABLE")
 

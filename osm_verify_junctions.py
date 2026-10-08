@@ -50,9 +50,9 @@ avoid getting temporarily blocked), it:
     just run it again and it will skip everything already resolved
     (junctions that ended in ERROR, e.g. a server timeout, are retried)
 
-By default it reads junctions_topology_v5.xlsx and Holidays.xlsx next to
+By default it reads junctions_topology_v6.xlsx and Holidays.xlsx next to
 this script and writes the OSM columns into the Junctions tab of
-junctions_topology_v5.xlsx itself. Re-running refills the existing OSM
+junctions_topology_v6.xlsx itself. Re-running refills the existing OSM
 columns instead of adding new ones. Pass --holidays-xlsx '' to skip the
 Holidays step and go straight to OSM.
 
@@ -76,7 +76,7 @@ import requests
 from openpyxl import load_workbook
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
-DEFAULT_XLSX = os.path.join(SCRIPT_DIR, "junctions_topology_v5.xlsx")
+DEFAULT_XLSX = os.path.join(SCRIPT_DIR, "junctions_topology_v6.xlsx")
 DEFAULT_HOLIDAYS = os.path.join(SCRIPT_DIR, "Holidays.xlsx")
 DEFAULT_CACHE = os.path.join(SCRIPT_DIR, "osm_junction_cache.json")
 

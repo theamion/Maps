@@ -56,7 +56,7 @@ from openpyxl import load_workbook
 import map_icons
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
-DEFAULT_XLSX = os.path.join(SCRIPT_DIR, "junctions_topology_v5.xlsx")
+DEFAULT_XLSX = os.path.join(SCRIPT_DIR, "junctions_topology_v6.xlsx")
 DEFAULT_CACHE = os.path.join(SCRIPT_DIR, "serways_cache.json")
 SITEMAP_URL = "https://www.serways.de/standort-sitemap.xml"
 DIRS = ("ost", "west", "nord", "sued")

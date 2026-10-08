@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 apply_osm_distances.py - copy 'OSRM route afstand (km)' over 'Distance (km)'
-in the Segments tab of junctions_topology_v5.xlsx, for every segment whose
+in the Segments tab of junctions_topology_v6.xlsx, for every segment whose
 'OSRM status' is OK, and save the workbook. 'Distance (km)' is what
 mapmaking.py uses for its distance labels and route lengths.
 
@@ -15,7 +15,7 @@ import os
 from openpyxl import load_workbook
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
-DEFAULT_XLSX = os.path.join(SCRIPT_DIR, "junctions_topology_v5.xlsx")
+DEFAULT_XLSX = os.path.join(SCRIPT_DIR, "junctions_topology_v6.xlsx")
 
 
 def main():

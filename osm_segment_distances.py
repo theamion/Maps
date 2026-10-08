@@ -31,7 +31,7 @@ each segment:
 
 It never overwrites the Distance (km) column: it only ADDS new columns
 (OSRM route distance, delta vs. current, delta %) to the Segments tab of
-the workbook (by default junctions_topology_v5.xlsx next to this script,
+the workbook (by default junctions_topology_v6.xlsx next to this script,
 written in place), so you can review and decide which segments to
 correct. Re-running refills those columns instead of adding new ones.
 
@@ -62,7 +62,7 @@ import requests
 from openpyxl import load_workbook
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
-DEFAULT_XLSX = os.path.join(SCRIPT_DIR, "junctions_topology_v5.xlsx")
+DEFAULT_XLSX = os.path.join(SCRIPT_DIR, "junctions_topology_v6.xlsx")
 DEFAULT_CACHE = os.path.join(SCRIPT_DIR, "osm_segment_cache.json")
 
 OSRM_SERVERS = [

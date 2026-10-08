@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Standalone referential-integrity checker for junctions_topology_v5.xlsx.
+"""Standalone referential-integrity checker for junctions_topology_v6.xlsx.
 
 Independent of mapmaking.py's render pipeline on purpose: a rendering bug
 only shows up if you happen to look at the right spot on the map (that's
@@ -11,11 +11,12 @@ pass, so a mistake is caught by running a check, not by spotting a glitch.
 Usage: python3 check_data_integrity.py [path-to-xlsx]
 Exits 1 if any error was found, 0 otherwise (warnings never affect the exit code).
 """
+import math
 import sys
 
 from openpyxl import load_workbook
 
-DEFAULT_XLSX = "junctions_topology_v5.xlsx"
+DEFAULT_XLSX = "junctions_topology_v6.xlsx"
 
 
 def sheet_rows(wb, name):
@@ -117,6 +118,51 @@ def check_orphans(wb, warnings):
                             f"is never used as a Border Segments From/To ID")
 
 
+def check_ambiguous_one_sided_points(wb, warnings, near_km=0.3):
+    """A one-sided station (Sides=1) with no 'Side direction' relies on its
+    own coordinate to tell which side of the road it's on - a coordinate
+    that was estimated by interpolating onto the straight line between the
+    segment's two junctions (common for a station added from a brand
+    survey rather than individually geocoded) sits so close to that line
+    that the side becomes a coin flip, just as it did for Velder before it
+    was fixed (see mapmaking.py's fuel_side_visible()/one_sided_marker_side()).
+    Flags any one-sided, no-Side-direction point within `near_km` of its
+    segment's own junction-to-junction line."""
+    pidx, prows = sheet_rows(wb, "Points")
+    jidx, jrows = sheet_rows(wb, "Junctions")
+    sidx, srows = sheet_rows(wb, "Segments")
+    junction_pos = {row[jidx["ID"]]: (row[jidx["Latitude"]], row[jidx["Longitude"]])
+                    for row in jrows if row[jidx["ID"]] and row[jidx["Latitude"]] is not None}
+    segment_ends = {row[sidx["Edge ID"]]: (row[sidx["From ID"]], row[sidx["To ID"]])
+                    for row in srows if row[sidx["Edge ID"]]}
+    for row in prows:
+        if row[pidx["Sides (1 or 2)"]] != 1 or row[pidx.get("Side direction")]:
+            continue
+        lat, lon = row[pidx["Latitude"]], row[pidx["Longitude"]]
+        eid = row[pidx["Edge ID"]]
+        if lat is None or lon is None or eid not in segment_ends:
+            continue
+        fid, tid = segment_ends[eid]
+        if fid not in junction_pos or tid not in junction_pos:
+            continue
+        flat, flon = junction_pos[fid]
+        tlat, tlon = junction_pos[tid]
+        cos_lat = math.cos(math.radians((flat + tlat) / 2))
+        fx, fy = flon * cos_lat, flat
+        tx, ty = tlon * cos_lat, tlat
+        px, py = lon * cos_lat, lat
+        road_dx, road_dy = tx - fx, ty - fy
+        road_len = math.hypot(road_dx, road_dy)
+        if road_len < 1e-9:
+            continue
+        cross = road_dx * (py - fy) - road_dy * (px - fx)
+        dist_km = abs(cross) / road_len * 111.2
+        if dist_km < near_km:
+            warnings.append(f"[Points] {row[pidx['Point ID']]} \"{row[pidx['Name']]}\" is one-sided with no "
+                            f"Side direction, and its coordinate is only ~{dist_km*1000:.0f}m from the "
+                            f"{eid} From/To line - which side it renders on may be unreliable")
+
+
 def main():
     xlsx_path = sys.argv[1] if len(sys.argv) > 1 else DEFAULT_XLSX
     wb = load_workbook(xlsx_path, data_only=True)
@@ -166,8 +212,9 @@ def main():
     junction_names = {row[jidx["Junction name"]] for row in jrows if row[jidx["Junction name"]]}
     check_fk(wb, "NaturalRegions", "Junction name", junction_names, "Junctions", errors, ["Region name"])
 
-    # 3. orphans (soft)
+    # 3. orphans and ambiguous one-sided points (soft)
     check_orphans(wb, warnings)
+    check_ambiguous_one_sided_points(wb, warnings)
 
     for e in errors:
         print("ERROR:", e)

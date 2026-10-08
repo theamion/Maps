@@ -19,7 +19,7 @@ cross. Because each view is one SVG that scales as a whole, a layout
 without overlaps in SVG units has no overlaps at any zoom level, and the
 maximum zoom is set so the text is fully readable.
 
-Usage (reads junctions_topology_v5.xlsx, writes holidays.html, both
+Usage (reads junctions_topology_v6.xlsx, writes holidays.html, both
 next to this script):
     python3 mapmaking.py
     python3 mapmaking.py --from Vught --to Berwang --via "Venlo,Koblenz"
@@ -42,7 +42,7 @@ import map_icons
 from map_icons import text_width
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
-DEFAULT_XLSX = os.path.join(SCRIPT_DIR, 'junctions_topology_v5.xlsx')
+DEFAULT_XLSX = os.path.join(SCRIPT_DIR, 'junctions_topology_v6.xlsx')
 DEFAULT_OUTPUT = os.path.join(SCRIPT_DIR, 'holidays.html')
 
 
@@ -2856,7 +2856,7 @@ def build_map(xlsx_path=DEFAULT_XLSX, title="Geographic Spine Map", tube_style_h
     svg, legend_html, segments_geo_json = core['svg'], core['legend_html'], core['segments_geo_json']
 
     html = f'''<!DOCTYPE html>
-<html><head><meta charset="utf-8"><title>{title}</title>
+<html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>{title}</title>
 <style>
   body {{ margin:0; background:#f0efe9; overflow:hidden; }}
   #wrap {{ width:100vw; height:100vh; overflow:hidden; cursor:grab; touch-action:none; }}
@@ -2868,7 +2868,7 @@ def build_map(xlsx_path=DEFAULT_XLSX, title="Geographic Spine Map", tube_style_h
   #legendPanel.visible {{ display:block; }}
   #controlsPanel {{ display:none; flex-direction:column; gap:6px; }}
   #controlsPanel.open {{ display:flex; }}
-  #controls button {{ width:36px; height:36px; font-size:20px; border:1px solid #999; background:white;
+  #controls button {{ width:44px; height:44px; font-size:20px; border:1px solid #999; background:white;
                        border-radius:6px; cursor:pointer; box-shadow:0 1px 3px rgba(0,0,0,0.2); }}
   #controls button:active {{ background:#eee; }}
   #controls button.active {{ background:#2C6BD1; color:white; }}
@@ -2988,10 +2988,21 @@ def build_map(xlsx_path=DEFAULT_XLSX, title="Geographic Spine Map", tube_style_h
   }});
   window.addEventListener('mouseup', function() {{ dragging = false; wrap.classList.remove('grabbing'); }});
 
-  // touch support (pinch + drag)
+  // touch support (pinch + drag + double-tap to zoom)
   let pinchDist = null;
+  let lastTapTime = 0, lastTapX = 0, lastTapY = 0;
   wrap.addEventListener('touchstart', function(e) {{
-    if (e.touches.length === 1) {{ dragging = true; lastX = e.touches[0].clientX; lastY = e.touches[0].clientY; }}
+    if (e.touches.length === 1) {{
+      dragging = true; lastX = e.touches[0].clientX; lastY = e.touches[0].clientY;
+      const now = Date.now();
+      if (now - lastTapTime < 300 && Math.hypot(lastX-lastTapX, lastY-lastTapY) < 30) {{
+        const rect = wrap.getBoundingClientRect();
+        zoomAt(2, lastX - rect.left, lastY - rect.top);
+        lastTapTime = 0;
+      }} else {{
+        lastTapTime = now; lastTapX = lastX; lastTapY = lastY;
+      }}
+    }}
     else if (e.touches.length === 2) {{
       pinchDist = Math.hypot(e.touches[0].clientX-e.touches[1].clientX, e.touches[0].clientY-e.touches[1].clientY);
     }}
@@ -3175,8 +3186,13 @@ ROUTE_TABS = [
     dict(to="Serfaus", via=SERFAUS_VIA, branches=SERFAUS_BRANCHES),
     {"from": "Berwang", "to": "Vught"},
     {"from": "Serfaus", "to": "Vught", "via": SERFAUS_VIA, "branches": SERFAUS_BRANCHES},
-    {"from": "Zeewolde", "to": "Serfaus", "via": SERFAUS_VIA, "branches": SERFAUS_BRANCHES},
-    {"from": "Serfaus", "to": "Zeewolde", "via": SERFAUS_VIA, "branches": SERFAUS_BRANCHES},
+    # SERFAUS_BRANCHES' Kerpen->...->Ulm/Elchingen chain isn't on the
+    # Zeewolde<->Serfaus main path (v6's updated OSRM distances changed
+    # which route is shortest through Germany), so its own first node
+    # would never be on the main path and layout_routes() would crash
+    # looking it up - same reasoning as Wirfttal's branches=[] below.
+    {"from": "Zeewolde", "to": "Serfaus", "via": SERFAUS_VIA, "branches": []},
+    {"from": "Serfaus", "to": "Zeewolde", "via": SERFAUS_VIA, "branches": []},
     # DEFAULT_BRANCHES (Kerpen...Ulm/Elchingen, Weinsberg...Leonberg) are
     # both south-German chains tied to the Berwang/Serfaus main routes -
     # Wirfttal's route never reaches either, so each branch's own rejoin
@@ -4467,9 +4483,9 @@ HTML_TEMPLATE = """<!DOCTYPE html>
                align-items:flex-end; gap:6px; }}
   #controlsPanel {{ display:none; flex-direction:column; align-items:stretch; gap:6px; }}
   #controlsPanel.open {{ display:flex; }}
-  #controls button {{ font-size:13px; padding:6px 10px; border-radius:6px; border:1px solid #999; background:#fff; cursor:pointer; }}
+  #controls button {{ font-size:13px; padding:12px 10px; min-height:44px; border-radius:6px; border:1px solid #999; background:#fff; cursor:pointer; }}
   #controls button.active {{ background:#1B3A6B; color:#fff; border-color:#1B3A6B; }}
-  #controlsToggle {{ width:36px; height:36px; font-size:18px; padding:0; align-self:flex-end; }}
+  #controlsToggle {{ width:44px; height:44px; font-size:18px; padding:0; align-self:flex-end; }}
   #controlsToggle.open {{ background:#1B3A6B; color:#fff; border-color:#1B3A6B; }}
   #title {{ position:absolute; left:12px; top:12px; z-index:5; font-size:14px; font-weight:700; color:#1B3A6B;
             background:rgba(255,255,255,.88); padding:4px 10px; border-radius:6px; }}
@@ -4533,8 +4549,24 @@ HTML_TEMPLATE = """<!DOCTYPE html>
     lastX = e.clientX; lastY = e.clientY; apply();
   }});
   let lastTouchDist = null;
+  let lastTapTime = 0, lastTapX = 0, lastTapY = 0;
   wrap.addEventListener('touchstart', (e) => {{
-    if (e.touches.length === 1) {{ dragging=true; lastX=e.touches[0].clientX; lastY=e.touches[0].clientY; }}
+    if (e.touches.length === 1) {{
+      dragging=true; lastX=e.touches[0].clientX; lastY=e.touches[0].clientY;
+      const now = Date.now();
+      if (now - lastTapTime < 300 && Math.hypot(lastX-lastTapX, lastY-lastTapY) < 30) {{
+        const rect = wrap.getBoundingClientRect();
+        const mx = lastX - rect.left, my = lastY - rect.top;
+        const before = scale;
+        scale = Math.min(scale * 2, {max_zoom});
+        tx = mx - (mx - tx) * (scale / before);
+        ty = my - (my - ty) * (scale / before);
+        apply();
+        lastTapTime = 0;
+      }} else {{
+        lastTapTime = now; lastTapX = lastX; lastTapY = lastY;
+      }}
+    }}
     else if (e.touches.length === 2) {{ lastTouchDist = Math.hypot(e.touches[0].clientX-e.touches[1].clientX, e.touches[0].clientY-e.touches[1].clientY); }}
   }}, {{passive:true}});
   wrap.addEventListener('touchmove', (e) => {{
@@ -4677,9 +4709,11 @@ def combine_pages(map_html, routes, map_tab, page_title):
   html, body {{ margin:0; height:100%; overflow:hidden; background:#f0efe9;
                font-family: Arial, Helvetica, sans-serif; }}
   #tabs {{ position:absolute; top:0; left:0; right:0; height:40px; display:flex; gap:4px;
-           padding:6px 8px 0; box-sizing:border-box; background:#1B3A6B; }}
+           padding:6px 8px 0; box-sizing:border-box; background:#1B3A6B;
+           overflow-x:auto; -webkit-overflow-scrolling:touch; scrollbar-width:none; }}
+  #tabs::-webkit-scrollbar {{ display:none; }}
   #tabs button {{ border:0; border-radius:6px 6px 0 0; padding:0 16px; font-size:14px; cursor:pointer;
-                  background:#3A5A8C; color:#DDE6F3; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }}
+                  background:#3A5A8C; color:#DDE6F3; white-space:nowrap; flex:0 0 auto; min-height:34px; }}
   #tabs button[aria-selected="true"] {{ background:#f0efe9; color:#1B3A6B; font-weight:700; }}
   .view {{ position:absolute; top:40px; left:0; width:100%; height:calc(100% - 40px); border:0;
            visibility:hidden; }}

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 apply_osm_coords.py - copy 'OSM lat' / 'OSM lon' over 'Latitude' /
-'Longitude' in the Junctions tab of junctions_topology_v5.xlsx, for every
+'Longitude' in the Junctions tab of junctions_topology_v6.xlsx, for every
 junction where both OSM values are filled in, and save the workbook.
 
 Usage:
@@ -14,7 +14,7 @@ import os
 from openpyxl import load_workbook
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
-DEFAULT_XLSX = os.path.join(SCRIPT_DIR, "junctions_topology_v5.xlsx")
+DEFAULT_XLSX = os.path.join(SCRIPT_DIR, "junctions_topology_v6.xlsx")
 
 
 def main():
