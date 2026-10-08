@@ -27,6 +27,7 @@ next to this script):
 import argparse
 import colorsys
 import hashlib
+import heapq
 import html as html_lib
 import json
 import math
@@ -1746,6 +1747,280 @@ def river_bow_control(a, b, road_polylines, max_tries=12):
     return (mx + perp[0]*base_bow, my + perp[1]*base_bow)
 
 
+# ------------------------------------------------------ line routing ---
+# Rivers and borders must not cross roads, borders or other rivers except at
+# their own two endpoints (a river bridge, a border crossing, a river
+# junction, a shared point like Tolkamer), and a border may not run
+# alongside another border. The classic shapes (a gentle bow for a river,
+# a Z or L for a border) are tried first; when every one of them breaks a
+# rule, an A* search over a grid of the map finds a free path around the
+# obstacles. Crossing an obstacle is never forbidden outright, only very
+# expensive, so in an impossible case the path with the fewest crossings
+# still comes out.
+
+ROUTE_CELL = 0.1          # grid cell, in normalised map units (6 px)
+ROUTE_END_FREE = 0.07     # around a route's own endpoints obstacles don't count (≈4 px)
+ROUTE_END_FREE_CELLS = 1.5  # A*: obstacle cells this close to the start/end cell are free
+ROUTE_CROSS_COST = 400.0  # cost of entering an obstacle cell
+ROUTE_TURN_COST = 4.0     # borders: cost of a 90-degree bend (keeps them simple)
+BORDER_CLEARANCE = 0.12   # borders keep at least this far from other borders
+
+
+def _seg_intersection(p1, p2, p3, p4):
+    d = (p2[0]-p1[0])*(p4[1]-p3[1]) - (p2[1]-p1[1])*(p4[0]-p3[0])
+    if abs(d) < 1e-12:
+        return None
+    t = ((p3[0]-p1[0])*(p4[1]-p3[1]) - (p3[1]-p1[1])*(p4[0]-p3[0])) / d
+    u = ((p3[0]-p1[0])*(p2[1]-p1[1]) - (p3[1]-p1[1])*(p2[0]-p1[0])) / d
+    if 0 <= t <= 1 and 0 <= u <= 1:
+        return (p1[0] + t*(p2[0]-p1[0]), p1[1] + t*(p2[1]-p1[1]))
+    return None
+
+
+def _point_seg_dist(p, a, b):
+    dx, dy = b[0]-a[0], b[1]-a[1]
+    L = dx*dx + dy*dy
+    t = 0.0 if L == 0 else max(0.0, min(1.0, ((p[0]-a[0])*dx + (p[1]-a[1])*dy) / L))
+    return math.hypot(p[0]-a[0]-t*dx, p[1]-a[1]-t*dy)
+
+
+def route_crossings(path, obstacles, ends, free=ROUTE_END_FREE):
+    """How many times `path` crosses an obstacle polyline away from the
+    route's own endpoints."""
+    n = 0
+    for p1, p2 in zip(path, path[1:]):
+        lo_x, hi_x = min(p1[0], p2[0]), max(p1[0], p2[0])
+        lo_y, hi_y = min(p1[1], p2[1]), max(p1[1], p2[1])
+        for poly in obstacles:
+            for p3, p4 in zip(poly, poly[1:]):
+                if max(p3[0], p4[0]) < lo_x or min(p3[0], p4[0]) > hi_x \
+                        or max(p3[1], p4[1]) < lo_y or min(p3[1], p4[1]) > hi_y:
+                    continue
+                q = _seg_intersection(p1, p2, p3, p4)
+                if q and all(math.hypot(q[0]-e[0], q[1]-e[1]) > free for e in ends):
+                    n += 1
+    return n
+
+
+def route_too_close(path, others, ends, clearance=BORDER_CLEARANCE, free=ROUTE_END_FREE):
+    """True if `path` comes within `clearance` of another line (other than
+    near the route's own endpoints) - i.e. would run alongside it."""
+    for p1, p2 in zip(path, path[1:]):
+        steps = max(1, int(math.hypot(p2[0]-p1[0], p2[1]-p1[1]) / (clearance / 2)))
+        for k in range(steps + 1):
+            p = (p1[0] + (p2[0]-p1[0])*k/steps, p1[1] + (p2[1]-p1[1])*k/steps)
+            if any(math.hypot(p[0]-e[0], p[1]-e[1]) <= free for e in ends):
+                continue
+            for poly in others:
+                for q1, q2 in zip(poly, poly[1:]):
+                    if _point_seg_dist(p, q1, q2) < clearance:
+                        return True
+    return False
+
+
+class ObstacleGrid:
+    """Obstacle lines rasterised onto a grid of ROUTE_CELL cells: each cell
+    stores how many obstacle lines run through it (with a margin)."""
+
+    def __init__(self):
+        self.cells = defaultdict(int)
+
+    def add(self, poly, margin=0.0):
+        g = ROUTE_CELL
+        r = int(math.ceil(margin / g))
+        for p1, p2 in zip(poly, poly[1:]):
+            steps = max(1, int(math.hypot(p2[0]-p1[0], p2[1]-p1[1]) / (g / 3)))
+            seen = set()
+            for k in range(steps + 1):
+                x = p1[0] + (p2[0]-p1[0])*k/steps
+                y = p1[1] + (p2[1]-p1[1])*k/steps
+                ci, cj = int(math.floor(x / g)), int(math.floor(y / g))
+                for di in range(-r, r + 1):
+                    for dj in range(-r, r + 1):
+                        seen.add((ci + di, cj + dj))
+            for c in seen:
+                self.cells[c] += 1
+
+
+def astar_route(a, b, grid, orthogonal, max_expand=400000):
+    """Cheapest grid path from a to b. Obstacle cells cost ROUTE_CROSS_COST
+    to enter, except within ROUTE_END_FREE of a or b. orthogonal=True:
+    4-way moves with a cost per bend (borders); else 8-way moves (rivers).
+    Returns a list of cell-centre points, starting at a and ending at b."""
+    g = ROUTE_CELL
+    cell = lambda p: (int(math.floor(p[0] / g)), int(math.floor(p[1] / g)))
+    centre = lambda c: ((c[0] + 0.5) * g, (c[1] + 0.5) * g)
+    s, t = cell(a), cell(b)
+    span = max(abs(t[0]-s[0]), abs(t[1]-s[1]))
+    pad = max(15, span // 2)
+    lo_i, hi_i = min(s[0], t[0]) - pad, max(s[0], t[0]) + pad
+    lo_j, hi_j = min(s[1], t[1]) - pad, max(s[1], t[1]) + pad
+    free_r = ROUTE_END_FREE_CELLS
+
+    def enter_cost(c):
+        if grid.cells.get(c, 0) == 0:
+            return 0.0
+        if math.hypot(c[0]-s[0], c[1]-s[1]) <= free_r or math.hypot(c[0]-t[0], c[1]-t[1]) <= free_r:
+            return 0.0
+        return ROUTE_CROSS_COST
+
+    if orthogonal:
+        moves = [(1, 0, 1.0), (-1, 0, 1.0), (0, 1, 1.0), (0, -1, 1.0)]
+    else:
+        d = math.sqrt(2)
+        moves = [(1, 0, 1.0), (-1, 0, 1.0), (0, 1, 1.0), (0, -1, 1.0),
+                 (1, 1, d), (1, -1, d), (-1, 1, d), (-1, -1, d)]
+
+    def h(c):
+        dx, dy = abs(c[0]-t[0]), abs(c[1]-t[1])
+        return dx + dy if orthogonal else max(dx, dy) + (math.sqrt(2) - 1) * min(dx, dy)
+
+    start = (s, None)
+    best = {start: 0.0}
+    came = {}
+    heap = [(h(s), 0.0, s, None)]
+    expanded = 0
+    goal_state = None
+    while heap and expanded < max_expand:
+        f, gc, c, dirn = heapq.heappop(heap)
+        if gc > best.get((c, dirn), math.inf):
+            continue
+        expanded += 1
+        if c == t:
+            goal_state = (c, dirn)
+            break
+        for di, dj, step in moves:
+            n = (c[0] + di, c[1] + dj)
+            if not (lo_i <= n[0] <= hi_i and lo_j <= n[1] <= hi_j):
+                continue
+            ndir = (di, dj)
+            cost = gc + step + enter_cost(n)
+            if orthogonal and dirn is not None and ndir != dirn:
+                cost += ROUTE_TURN_COST
+            key = (n, ndir if orthogonal else None)
+            if cost < best.get(key, math.inf):
+                best[key] = cost
+                came[key] = (c, dirn if orthogonal else None)
+                heapq.heappush(heap, (cost + h(n), cost, n, ndir if orthogonal else None))
+    if goal_state is None:
+        return None
+    cells = []
+    k = goal_state
+    while k != start:
+        cells.append(k[0])
+        k = came[k]
+    cells.append(s)
+    cells.reverse()
+    return [a] + [centre(c) for c in cells[1:-1]] + [b]
+
+
+def _simplify_orthogonal(pts, a, b):
+    """Grid path (a, cell centres..., b) -> a, its corner points, b, with
+    every leg horizontal or vertical: the first corner is moved onto a's row
+    or column (whichever its first straight run follows), the last one onto
+    b's."""
+    inner = pts[1:-1]
+    if len(inner) < 2:
+        return [a, b] if abs(a[0]-b[0]) < 1e-9 or abs(a[1]-b[1]) < 1e-9 else [a, (b[0], a[1]), b]
+    horiz = lambda p, q: abs(p[1]-q[1]) < 1e-9
+    corners = [inner[i] for i in range(1, len(inner) - 1)
+               if horiz(inner[i-1], inner[i]) != horiz(inner[i], inner[i+1])]
+    first_h, last_h = horiz(inner[0], inner[1]), horiz(inner[-2], inner[-1])
+    if not corners:
+        # one straight run: a -> along it -> b
+        if first_h:
+            return [a, (b[0], a[1]), b] if abs(a[1]-b[1]) > 1e-9 else [a, b]
+        return [a, (a[0], b[1]), b] if abs(a[0]-b[0]) > 1e-9 else [a, b]
+    c0 = corners[0]
+    corners[0] = (c0[0], a[1]) if first_h else (a[0], c0[1])
+    cl = corners[-1]
+    corners[-1] = (cl[0], b[1]) if last_h else (b[0], cl[1])
+    if len(corners) == 1:
+        c = corners[0]
+        corners[0] = (b[0], a[1]) if first_h else (a[0], b[1])
+    # the middle legs keep their row/column; re-align the second and
+    # second-to-last corners with the moved ones
+    if len(corners) >= 2:
+        c1 = corners[1]
+        corners[1] = (corners[0][0], c1[1]) if first_h else (c1[0], corners[0][1])
+        cp = corners[-2]
+        corners[-2] = (corners[-1][0], cp[1]) if last_h else (cp[0], corners[-1][1])
+    path = [a] + corners + [b]
+    out = [path[0]]
+    for q in path[1:]:
+        if abs(q[0]-out[-1][0]) > 1e-9 or abs(q[1]-out[-1][1]) > 1e-9:
+            out.append(q)
+    return out
+
+
+def _string_pull(pts, obstacles, ends):
+    """Grid path -> as few straight legs as possible without adding crossings."""
+    out = [pts[0]]
+    i = 0
+    while i < len(pts) - 1:
+        j = len(pts) - 1
+        while j > i + 1 and route_crossings([pts[i], pts[j]], obstacles, ends) > \
+                route_crossings(pts[i:j+1], obstacles, ends):
+            j -= 1
+        out.append(pts[j])
+        i = j
+    return out
+
+
+def _chaikin(pts, rounds=3):
+    for _ in range(rounds):
+        new = [pts[0]]
+        for p, q in zip(pts, pts[1:]):
+            new.append((0.75*p[0] + 0.25*q[0], 0.75*p[1] + 0.25*q[1]))
+            new.append((0.25*p[0] + 0.75*q[0], 0.25*p[1] + 0.75*q[1]))
+        new.append(pts[-1])
+        pts = new
+    return pts
+
+
+def route_river(a, b, obstacles, grid):
+    """A river from a to b as a polyline: the classic gentle bow when it is
+    free, else an A* path around the obstacles, smoothed into a curve."""
+    ends = [a, b]
+    bow = sample_quadratic_bezier(a, river_bow_control(a, b, obstacles), b, n=24)
+    if route_crossings(bow, obstacles, ends) == 0:
+        return bow
+    cells = astar_route(a, b, grid, orthogonal=False)
+    if not cells:
+        return bow
+    pulled = _string_pull(cells, obstacles, ends)
+    smooth = _chaikin(pulled)
+    best = min((smooth, pulled, bow), key=lambda p: route_crossings(p, obstacles, ends))
+    return best
+
+
+def route_border(a, b, obstacles, borders, grid, first_try=None):
+    """A border from a to b: orthogonal legs only. The classic Z/L shapes
+    (and `first_try`, e.g. a tripoint's assigned first direction) are used
+    when they cross nothing and keep clear of other borders; otherwise an
+    orthogonal A* path with few bends."""
+    ends = [a, b]
+    ax, ay = a
+    bx, by = b
+    candidates = [first_try] if first_try else []
+    if abs(bx-ax) < 1e-9 or abs(by-ay) < 1e-9:
+        candidates.append([a, b])
+    else:
+        mx, my = (ax + bx) / 2, (ay + by) / 2
+        candidates += [[a, (ax, my), (bx, my), b], [a, (mx, ay), (mx, by), b],
+                       [a, (ax, by), b], [a, (bx, ay), b]]
+    for c in candidates:
+        if route_crossings(c, obstacles + borders, ends) == 0 and not route_too_close(c, borders, ends):
+            return c
+    cells = astar_route(a, b, grid, orthogonal=True)
+    if not cells:
+        return candidates[0]
+    path = _simplify_orthogonal(cells, a, b)
+    best = min([path] + candidates, key=lambda p: (route_crossings(p, obstacles + borders, ends),
+                                                     route_too_close(p, borders, ends)))
+    return best
+
+
 # ------------------------------------------------------------- regions ---
 # Soft background "blobs" that highlight a leisure area (Ardennes & Eifel,
 # Sauerland, ...), like the green shapes on a hand-drawn touring map. Each
@@ -1958,21 +2233,35 @@ def render_map(junctions, segments, pos, roads, points, border_data, border_node
     river_svg_paths = []
     river_sampled_polys = []
     road_polylines_list = list(polylines.values())
+    # one obstacle grid for the A* fallback in route_river/route_border:
+    # roads now, then every river and border as soon as it is routed
+    route_grid = ObstacleGrid()
+    for poly in road_polylines_list:
+        route_grid.add(poly)
     if river_data:
+        # a river's bridge endpoints must sit ON the final road line (the
+        # positions passed in were taken from the roads before tube-style
+        # bends and crossing fixes), or the river crosses its own road
+        # a few pixels beside the bridge
+        river_pos = dict(river_data['pos'])
+        for p in points:
+            poly = polylines.get(p['edge_id'])
+            if p['id'] in river_pos and poly:
+                river_pos[p['id']] = point_at_fraction_on_polyline(poly, p['pos_on_edge'])[0]
         for seg in river_data.get('segments', []):
-            a, b = river_data['pos'].get(seg['from']), river_data['pos'].get(seg['to'])
+            a, b = river_pos.get(seg['from']), river_pos.get(seg['to'])
             if not a or not b:
                 continue
-            # rivers must also never cross EACH OTHER except where they
-            # actually meet (a shared River Junction endpoint - confluence
-            # or split), so each new river also avoids every one already drawn
-            control = river_bow_control(a, b, road_polylines_list + river_sampled_polys)
-            sampled = sample_quadratic_bezier(a, control, b)
+            # rivers must never cross roads or EACH OTHER except where they
+            # actually meet (a bridge, or a shared River Junction endpoint -
+            # confluence or split), so each new river avoids every one drawn
+            sampled = route_river(a, b, road_polylines_list + river_sampled_polys, route_grid)
             river_sampled_polys.append(sampled)
+            route_grid.add(sampled)
+            d = "M " + " L ".join(f"{X(x):.1f} {Y(y):.1f}" for x, y in sampled)
             river_svg_paths.append(
-                f'<path d="M {X(a[0]):.1f} {Y(a[1]):.1f} Q {X(control[0]):.1f} {Y(control[1]):.1f} '
-                f'{X(b[0]):.1f} {Y(b[1]):.1f}" stroke="#7FB8E0" stroke-width="3.5" '
-                f'fill="none" stroke-linecap="round" opacity="0.85"/>')
+                f'<path d="{d}" stroke="#7FB8E0" stroke-width="3.5" '
+                f'fill="none" stroke-linecap="round" stroke-linejoin="round" opacity="0.85"/>')
 
     avoid_polys = road_polylines_list + river_sampled_polys
     border_svg_paths = []
@@ -2034,12 +2323,11 @@ def render_map(junctions, segments, pos, roads, points, border_data, border_node
             ox, oy = origin
             tx, ty = target
             elbow = (tx, oy) if direction in ('E', 'W') else (ox, ty)
-            candidate = [origin, elbow, target]
-            obstacles = avoid_polys + border_drawn_polys
-            if path_crosses_roads(candidate, obstacles, [origin, target]):
-                candidate = orthogonal_route(origin, target, road_polylines=obstacles, skip_near=[origin, target])
+            candidate = route_border(origin, target, avoid_polys, border_drawn_polys, route_grid,
+                                     first_try=[origin, elbow, target])
             tripoint_routes[id(seg)] = (candidate, origin)
             border_drawn_polys.append(candidate)
+            route_grid.add(candidate, margin=BORDER_CLEARANCE)
 
     for seg in border_data.get('segments', []):
         a, b = border_node_pos.get(seg['from']), border_node_pos.get(seg['to'])
@@ -2050,8 +2338,9 @@ def render_map(junctions, segments, pos, roads, points, border_data, border_node
             if origin != a:
                 route = list(reversed(route))
         else:
-            route = orthogonal_route(a, b, road_polylines=avoid_polys + border_drawn_polys, skip_near=[a, b])
+            route = route_border(a, b, avoid_polys, border_drawn_polys, route_grid)
             border_drawn_polys.append(route)
+            route_grid.add(route, margin=BORDER_CLEARANCE)
         d = "M " + " L ".join(f"{X(x):.1f} {Y(y):.1f}" for x, y in route)
         border_svg_paths.append(f'<path d="{d}" stroke="#3A3A38" stroke-width="2" fill="none" '
                                  f'stroke-dasharray="6,4" stroke-linecap="round" opacity="0.7"/>')
@@ -3699,6 +3988,25 @@ def render_graph(junctions, seg_by_pair, points_by_edge, node_x, node_lane, edge
     primary = {n: node_x[n] for n in node_x}
     secondary = {n: node_lane[n] for n in node_x}
 
+    # minimum cumulative km from the route's own start to each junction -
+    # relaxed over all drawn edges rather than assumed topological, since a
+    # branch can rejoin the main path at a node reachable multiple ways.
+    # Bounded to len(node_x) passes: more than enough for this hop-graph's
+    # depth, and cheap at this scale.
+    cum_km = {source: 0.0}
+    for _ in range(len(node_x)):
+        changed = False
+        for key, (u, v) in edges_drawn.items():
+            seg = seg_by_pair.get(key)
+            if not seg or seg["distance_km"] is None or u not in cum_km:
+                continue
+            total = cum_km[u] + seg["distance_km"]
+            if v not in cum_km or total < cum_km[v] - 1e-9:
+                cum_km[v] = total
+                changed = True
+        if not changed:
+            break
+
     min_p, max_p = min(primary.values()), max(primary.values())
     min_s, max_s = min(secondary.values()) - 1, max(secondary.values()) + 1
 
@@ -3994,6 +4302,29 @@ def render_graph(junctions, seg_by_pair, points_by_edge, node_x, node_lane, edge
             f'<g class="dist-label">{line}<text x="{box[0]:.1f}" y="{box[1] + GRAPH_DIST_FONT * BASELINE:.1f}">'
             f'{text}</text></g>')
 
+    # --- cumulative km from the route's own start, one per junction (same
+    # toggle as the segment distances above, which only show that one
+    # hop's own length) - placed beside the circle, preferring the side
+    # opposite the junction name's usual spot (name favours the right/
+    # up-right; this favours the left), falling back to whichever side the
+    # shared placer finds free ---
+    for n in node_x:
+        km = cum_km.get(n)
+        if km is None or n == source:
+            continue
+        cx, cy = px(n), py(n)
+        text = f"({km:.1f} km)" if km < 10 else f"({km:.0f} km)"
+        w, h = text_width(text, GRAPH_DIST_FONT), GRAPH_DIST_FONT * LINE_HEIGHT
+        r = TIER_RADIUS.get(junctions[n]["tier"], 6.0)
+        box, leader = placer.place(cx, cy, w, h, 0, pref_side=-1, clear=r + 4)
+        line = ""
+        if leader:
+            ex, ey = nearest_on_box(cx, cy, box)
+            line = f'<line class="leader" x1="{cx:.1f}" y1="{cy:.1f}" x2="{ex:.1f}" y2="{ey:.1f}"/>'
+        svg_dists.append(
+            f'<g class="dist-label cum-label">{line}<text x="{box[0]:.1f}" '
+            f'y="{box[1] + GRAPH_DIST_FONT * BASELINE:.1f}">{text}</text></g>')
+
     svg = (
         f'<svg id="mapsvg" width="{width:.0f}" height="{height:.0f}" '
         f'viewBox="0 0 {width:.0f} {height:.0f}" xmlns="http://www.w3.org/2000/svg">'
@@ -4118,6 +4449,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
                      paint-order:stroke; stroke:#fbfaf6; stroke-width:2.4px; stroke-linejoin:round; }}
   .dist-label text {{ font-size:{dist_font}px; font-weight:700; fill:#185FA5;
                       paint-order:stroke; stroke:#fbfaf6; stroke-width:2.8px; stroke-linejoin:round; }}
+  .cum-label text {{ font-weight:500; font-style:italic; fill:#777; }}
   #controls {{ position:absolute; top:12px; right:12px; z-index:5; display:flex; flex-direction:column;
                align-items:flex-end; gap:6px; }}
   #controlsPanel {{ display:none; flex-direction:column; align-items:stretch; gap:6px; }}
@@ -4126,8 +4458,6 @@ HTML_TEMPLATE = """<!DOCTYPE html>
   #controls button.active {{ background:#1B3A6B; color:#fff; border-color:#1B3A6B; }}
   #controlsToggle {{ width:36px; height:36px; font-size:18px; padding:0; align-self:flex-end; }}
   #controlsToggle.open {{ background:#1B3A6B; color:#fff; border-color:#1B3A6B; }}
-  #info {{ position:absolute; bottom:10px; left:12px; z-index:5; font-size:12px; color:#444; background:rgba(255,255,255,.85);
-           padding:4px 8px; border-radius:6px; max-width:60vw; }}
   #title {{ position:absolute; left:12px; top:12px; z-index:5; font-size:14px; font-weight:700; color:#1B3A6B;
             background:rgba(255,255,255,.88); padding:4px 10px; border-radius:6px; }}
 </style>
@@ -4146,7 +4476,6 @@ HTML_TEMPLATE = """<!DOCTYPE html>
     <button id="togglePoi" class="active">&#9733; Bezienswaardigheden</button>
   </div>
 </div>
-<div id="info">hoofdroute ca. {shortest_km:.0f} km &middot; {route_count} route-varianten getoond (marge {margin_pct:.0f}% per traject)</div>
 <div id="wrap"><div id="stage" class="points-visible distances-on pois-on">{svg}</div></div>
 <script>
 (function() {{
@@ -4296,7 +4625,6 @@ def build_graph_page(xlsx_path=DEFAULT_XLSX, start_name=DEFAULT_FROM,
             title += " via " + ", ".join(junctions[v]['name'] for v in via_ids)
     html = HTML_TEMPLATE.format(
         title=_esc(title), svg=svg,
-        route_count=leg_count + 1, shortest_km=main_length, margin_pct=margin * 100,
         point_font=GRAPH_POINT_FONT, dist_font=GRAPH_DIST_FONT, junction_font=GRAPH_JUNCTION_FONT,
         poi_text=POI_TEXT, fuel_dist_font=GRAPH_FUEL_DIST_FONT, fuel_dist_colour=FUEL_DIST_COLOUR,
         max_zoom=GRAPH_MAX_ZOOM,
