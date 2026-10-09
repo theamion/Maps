@@ -11,10 +11,11 @@ in the script's own folder, whichever directory you run it from.
 
 | File | Role |
 |------|------|
-| `junctions_topology_v5.xlsx` | **Active database.** All scripts read it, and the OSM checks write their results into it |
+| `junctions_topology_v6.xlsx` | **Active database.** All scripts read it by default, and the OSM checks write their results into it. v5 plus every OSRM-verified segment distance (217 of 223) |
+| `junctions_topology_v5.xlsx` | **Archive.** Frozen snapshot from before the v6 distance refresh. Nothing reads it any more, so edits there don't reach the map |
 | `Holidays.xlsx` | **Reference.** The original source (`Database` sheet), used by `osm_verify_junctions.py` as its first source for coordinates |
 | `junctions_topology_v4.xlsx` | Previous workbook, which includes the research sheets `Tankstations` and `Nieuwe Points` |
-| `mapmaking.py` | Map and route diagram in one HTML page with two tabs → `holidays.html` |
+| `mapmaking.py` | The map and every route diagram in one HTML page with tabs → `holidays.html` |
 | `map_icons.py` | The brand-icon system `mapmaking.py` draws on fuel stations: loading `icons/fuel` and `icons/food`, the coloured-badge fallback, and the `Fuel brand`/`Food brand(s)` text parsing |
 | `icons/fuel/`, `icons/food/` | The actual logo image files, one per brand |
 | `serways_brands.py` | Finds each German station's fast-food/coffee brand(s) on serways.de → `Food brand(s)` in the Points tab |
@@ -22,6 +23,7 @@ in the script's own folder, whichever directory you run it from.
 | `osm_segment_distances.py` | Checks segment distances against OSRM driving distances |
 | `osm_point_leg_distances.py` | Measures each fuel station's distance along its segment with OSRM → `OSM DistanceFromStart (km)` in the Points tab (used by the route diagram) |
 | `apply_osm_coords.py`, `apply_osm_distances.py` | Copy reviewed OSM results into `Latitude`/`Longitude` and `Distance (km)` |
+| `check_data_integrity.py` | Checks the workbook's cross-sheet references (segments, points, river and border chains, duplicate IDs) and warns about orphans |
 | `osm_junction_cache.json`, `osm_segment_cache.json`, `serways_cache.json` | Caches for the OSM/serways checks, so runs can resume |
 | `generate_map_v2.deprecatedpy`, `generate_graph.deprecatedpy` | Superseded by `mapmaking.py`. Kept for reference only |
 
@@ -63,10 +65,11 @@ pip install cairosvg   # only for the PDF print version
 cd /home/theamion/Python/Maps
 python3 osm_verify_junctions.py      # 1. check junction coordinates → Junctions tab
 python3 osm_segment_distances.py     # 2. check segment distances → Segments tab
-python3 mapmaking.py                 # map + route Vught → Berwang → holidays.html
+python3 check_data_integrity.py      # 3. check the workbook's references and orphans
+python3 mapmaking.py                 # map + every route tab → holidays.html
 ```
 
-The OSM scripts save into `junctions_topology_v5.xlsx`, so close the workbook in
+The OSM scripts save into `junctions_topology_v6.xlsx`, so close the workbook in
 Excel before running them.
 
 ## mapmaking.py: map and route diagram
@@ -119,7 +122,7 @@ seconds per route tab.
 
 | Option | Default | Description |
 |--------|---------|-------------|
-| `--xlsx` | `junctions_topology_v5.xlsx` | Input workbook |
+| `--xlsx` | `junctions_topology_v6.xlsx` | Input workbook |
 | `--output` | `holidays.html` | Output HTML file (overwritten) |
 | **Kaart tab** | | |
 | `--map-title` | `Geographic Spine Map` | Page title |
@@ -440,7 +443,7 @@ in `mapmaking.py`, and `ICON_SIZE`, `FUEL_BRAND_COLOURS`, `FOOD_BRAND_COLOURS`,
 ## OpenStreetMap checks
 
 Both scripts write their results as extra columns in
-`junctions_topology_v5.xlsx`. They never change existing columns such as
+`junctions_topology_v6.xlsx`. They never change existing columns such as
 `Latitude`, `Longitude` or `Distance (km)`, so you review the results and decide
 what to correct.
 
@@ -457,7 +460,7 @@ Options for both scripts:
 
 | Option | Default | Description |
 |--------|---------|-------------|
-| `--xlsx` | `junctions_topology_v5.xlsx` | Workbook to read |
+| `--xlsx` | `junctions_topology_v6.xlsx` | Workbook to read |
 | `--output` | same as `--xlsx` | Workbook to write to. Pass another name to write to a copy |
 | `--cache` | `osm_junction_cache.json` / `osm_segment_cache.json` | Cache file |
 | `--limit N` | all | Only process the first N items (for testing) |
@@ -532,7 +535,7 @@ distance is still a good approximation.
 
 Once you've reviewed the OSM columns, two small scripts copy them into the
 columns that `mapmaking.py` uses. Both save straight into
-`junctions_topology_v5.xlsx`, so close it in Excel first.
+`junctions_topology_v6.xlsx`, so close it in Excel first.
 
 ```bash
 python3 apply_osm_coords.py      # Junctions: OSM lat/lon → Latitude/Longitude (where both are filled)
@@ -548,7 +551,7 @@ To measure and apply the distances in one go, skipping the review step:
 python3 osm_segment_distances.py --apply
 ```
 
-## Workbook sheets (junctions_topology_v5.xlsx)
+## Workbook sheets (junctions_topology_v6.xlsx)
 
 | Sheet | Contents | Used by |
 |-------|----------|---------|
