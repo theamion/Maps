@@ -336,6 +336,17 @@ The top bar has three tabs:
   stations, GPS, legend or debug, depending on the page. A checkmark shows
   what's on.
 
+**On a phone** (a narrow screen, or a touch screen up to tablet size) the
+layout adapts automatically. The three tabs move to the bottom of the screen,
+within thumb reach, as equally wide tabs with an icon. Routes and Weergave
+slide up as a sheet with large rows, and tapping outside the sheet closes it.
+The iPhone home bar and notch are kept clear. On a computer the tabs stay at
+the top, with Routes as a choice list and Weergave as a dropdown.
+
+**The map starts fully zoomed out and centred**, on every screen. The reset
+button (↺) returns to that view. Turning the phone fits the map again, as
+long as you haven't zoomed or panned yet.
+
 That menu is built from each page's own control buttons and clicks them, so
 all their behaviour lives in the page itself. When a page is shown inside
 `holidays.html`, its own floating &#9776; panel is hidden. Opened on its own,

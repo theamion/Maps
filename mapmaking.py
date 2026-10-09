@@ -3042,6 +3042,8 @@ def build_map(xlsx_path=DEFAULT_XLSX, title="Geographic Spine Map", tube_style_h
   const MARKER_TIER_ZOOM = {json.dumps(MARKER_TIER_ZOOM)};  // scale per declutter tier (see mapmaking.py)
   const MAP_MAX_ZOOM = {MAP_MAX_ZOOM};
   let scale = 1, panX = 0, panY = 0;
+  let minZoom = 0.15;        // lowered to the fit-everything scale by fitView()
+  let userMoved = false;     // until the user zooms or pans, a resize re-fits
   let dragging = false, lastX = 0, lastY = 0;
   // bridge/tunnel name toggle: 0 = off, 1 = on (name only), 2 = on + length
   const bridgeStates = ['bridges-off', 'bridges-on', 'bridges-full'];
@@ -3066,8 +3068,24 @@ def build_map(xlsx_path=DEFAULT_XLSX, title="Geographic Spine Map", tube_style_h
     updateLabelVisibility();
   }}
 
+  // the whole map, centred - the starting view and what reset returns to
+  function fitView() {{
+    const svg = stage.querySelector('svg');
+    const w = svg.width.baseVal.value, h = svg.height.baseVal.value;
+    const ww = wrap.clientWidth, wh = wrap.clientHeight;
+    if (!ww || !wh || !w || !h) return;
+    scale = Math.min(ww / w, wh / h) * 0.97;
+    minZoom = Math.min(0.15, scale);
+    panX = (ww - w * scale) / 2;
+    panY = (wh - h * scale) / 2;
+    userMoved = false;
+    apply();
+  }}
+  window.addEventListener('resize', () => {{ if (!userMoved) fitView(); }});
+
   function zoomAt(factor, cx, cy) {{
-    const newScale = Math.min(MAP_MAX_ZOOM, Math.max(0.15, scale * factor));
+    userMoved = true;
+    const newScale = Math.min(MAP_MAX_ZOOM, Math.max(minZoom, scale * factor));
     panX = cx - (cx - panX) * (newScale / scale);
     panY = cy - (cy - panY) * (newScale / scale);
     scale = newScale;
@@ -3086,7 +3104,7 @@ def build_map(xlsx_path=DEFAULT_XLSX, title="Geographic Spine Map", tube_style_h
   }});
   window.addEventListener('mousemove', function(e) {{
     if (!dragging) return;
-    panX += e.clientX - lastX; panY += e.clientY - lastY;
+    panX += e.clientX - lastX; panY += e.clientY - lastY; userMoved = true;
     lastX = e.clientX; lastY = e.clientY;
     apply();
   }});
@@ -3114,7 +3132,7 @@ def build_map(xlsx_path=DEFAULT_XLSX, title="Geographic Spine Map", tube_style_h
   wrap.addEventListener('touchmove', function(e) {{
     e.preventDefault();
     if (e.touches.length === 1 && dragging) {{
-      panX += e.touches[0].clientX - lastX; panY += e.touches[0].clientY - lastY;
+      panX += e.touches[0].clientX - lastX; panY += e.touches[0].clientY - lastY; userMoved = true;
       lastX = e.touches[0].clientX; lastY = e.touches[0].clientY;
       apply();
     }} else if (e.touches.length === 2 && pinchDist) {{
@@ -3130,7 +3148,7 @@ def build_map(xlsx_path=DEFAULT_XLSX, title="Geographic Spine Map", tube_style_h
 
   document.getElementById('zoomIn').onclick = () => zoomAt(1.3, wrap.clientWidth/2, wrap.clientHeight/2);
   document.getElementById('zoomOut').onclick = () => zoomAt(1/1.3, wrap.clientWidth/2, wrap.clientHeight/2);
-  document.getElementById('zoomReset').onclick = () => {{ scale=1; panX=0; panY=0; apply(); }};
+  document.getElementById('zoomReset').onclick = fitView;
   document.getElementById('debugToggle').onclick = function() {{
     stage.classList.toggle('debug-mode');
     this.classList.toggle('active');
@@ -3248,7 +3266,7 @@ def build_map(xlsx_path=DEFAULT_XLSX, title="Geographic Spine Map", tube_style_h
   }};
 
   applyBridgeState();
-  apply();
+  fitView();
 }})();
 </script>
 </body></html>'''
@@ -4809,12 +4827,18 @@ def combine_pages(map_html, routes, map_tab, page_title):
     collide. All frames keep their full size (hidden with visibility, not
     display), so each view's fit and zoom survive switching.
 
-    Top bar: "Kaart", "Routes" (a choice list of every route) and
-    "Weergave" (a dropdown with the view options of whichever page is
-    showing). That dropdown is built from the active page's own control
-    buttons and clicks them, so all their logic stays in the page; the
-    pages' own floating control panels are hidden while embedded.
-    routes: list of (title, page html); addresses #map, #route, #route2, ..."""
+    Three tabs: "Kaart", "Routes" (every route) and "Weergave" (the view
+    options of whichever page is showing - built from that page's own
+    control buttons, which it clicks, so all their logic stays in the page;
+    the pages' own floating control panels are hidden while embedded).
+
+    One responsive layout: on a computer the tabs sit at the top, Routes is
+    a choice list and Weergave a dropdown. On a phone (narrow screen, or a
+    touch screen up to tablet size) the tabs move to the bottom, within
+    thumb reach, as three equal tabs, and Routes and Weergave open as
+    bottom sheets with large rows; the iPhone home bar and notch are kept
+    clear. routes: list of (title, page html); addresses #map, #route,
+    #route2, ..."""
     esc = lambda s: html_lib.escape(s, quote=True)
     views = [("map", map_tab, map_html, ' allow="geolocation"')]
     views += [("route" if i == 0 else f"route{i + 1}", title, page, "") for i, (title, page) in enumerate(routes)]
@@ -4827,8 +4851,9 @@ def combine_pages(map_html, routes, map_tab, page_title):
         for i, (vid, title, page, attr) in enumerate(views))
     routes_tab = ''
     if routes:
-        routes_tab = ('  <div id="tab-routes" class="tab" role="tab" aria-selected="false">\n'
-                      '    <label for="routeSelect">Routes</label>\n'
+        routes_tab = ('  <div id="tab-routes" class="tab" role="tab" aria-selected="false" tabindex="0">\n'
+                      '    <span class="ico" aria-hidden="true">&#128739;&#65039;</span>\n'
+                      '    <label for="routeSelect" class="lbl">Routes</label>\n'
                       '    <select id="routeSelect" aria-label="Kies een route">\n'
                       + route_options + '\n    </select>\n  </div>')
     return (COMBINED_PAGE_TEMPLATE
@@ -4842,44 +4867,82 @@ def combine_pages(map_html, routes, map_tab, page_title):
 # would all need doubling)
 COMBINED_PAGE_TEMPLATE = '''<!DOCTYPE html>
 <html lang="nl"><head><meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="theme-color" content="#1B3A6B">
 <title>@@TITLE@@</title>
 <style>
   html, body { margin:0; height:100%; overflow:hidden; background:#f0efe9;
-               font-family: Arial, Helvetica, sans-serif; }
+               font-family: -apple-system, BlinkMacSystemFont, Arial, Helvetica, sans-serif; }
+  button, select, .tab { touch-action:manipulation; -webkit-tap-highlight-color:transparent; }
+
+  /* ---- computer: tabs on top ---- */
   #bar { position:absolute; top:0; left:0; right:0; height:44px; display:flex; gap:4px; align-items:flex-end;
          padding:6px 8px 0; box-sizing:border-box; background:#1B3A6B; z-index:20; }
   .tab { border:0; border-radius:6px 6px 0 0; padding:0 14px; font-size:14px; cursor:pointer;
          background:#3A5A8C; color:#DDE6F3; white-space:nowrap; height:38px; display:flex; align-items:center;
          gap:8px; box-sizing:border-box; font-family:inherit; }
   .tab[aria-selected="true"] { background:#f0efe9; color:#1B3A6B; font-weight:700; }
+  .tab .ico { display:none; }
   #tab-routes { min-width:0; flex:0 1 auto; }
   #tab-routes label { cursor:pointer; }
   #routeSelect { min-width:0; max-width:46vw; font-size:14px; padding:4px 6px; border-radius:5px;
                  border:1px solid #9AA9C2; background:#fff; color:#1B3A6B; }
   #tab-view { margin-left:auto; }
-  #viewMenu { position:absolute; top:44px; right:8px; z-index:30; display:none; min-width:230px;
-              max-width:calc(100vw - 16px); max-height:calc(100% - 60px); overflow-y:auto; background:#fff;
-              border:1px solid #9AA9C2; border-radius:0 0 8px 8px; box-shadow:0 6px 18px rgba(0,0,0,.18); }
-  #viewMenu.open { display:block; }
-  #viewMenu button { display:flex; align-items:center; gap:10px; width:100%; min-height:44px; padding:0 14px;
-                     border:0; border-bottom:1px solid #eef0f4; background:#fff; color:#1B3A6B; font-size:15px;
-                     text-align:left; cursor:pointer; font-family:inherit; }
-  #viewMenu button:last-child { border-bottom:0; }
-  #viewMenu button .mark { width:18px; text-align:center; font-weight:700; color:#2C6BD1; }
-  #viewMenu button .sym { min-width:24px; text-align:center; color:#555; }
-  #viewMenu button.on { background:#EEF3FB; }
   .view { position:absolute; top:44px; left:0; width:100%; height:calc(100% - 44px); border:0;
           visibility:hidden; }
   .view.active { visibility:visible; }
+
+  /* menus: a dropdown under the bar on a computer, a bottom sheet on a phone */
+  .menu { position:absolute; top:44px; right:8px; z-index:30; display:none; min-width:230px;
+          max-width:calc(100vw - 16px); max-height:calc(100% - 60px); overflow-y:auto; background:#fff;
+          border:1px solid #9AA9C2; border-radius:0 0 8px 8px; box-shadow:0 6px 18px rgba(0,0,0,.18);
+          -webkit-overflow-scrolling:touch; }
+  .menu.open { display:block; }
+  .menu h2 { display:none; }
+  .menu button { display:flex; align-items:center; gap:10px; width:100%; min-height:44px; padding:0 14px;
+                 border:0; border-bottom:1px solid #eef0f4; background:#fff; color:#1B3A6B; font-size:15px;
+                 text-align:left; cursor:pointer; font-family:inherit; }
+  .menu button:last-child { border-bottom:0; }
+  .menu button .mark { width:18px; flex:0 0 18px; text-align:center; font-weight:700; color:#2C6BD1; }
+  .menu button .sym { min-width:24px; text-align:center; color:#555; }
+  .menu button.on { background:#EEF3FB; }
+  #backdrop { position:absolute; inset:0; z-index:25; display:none; background:rgba(12,24,48,.28); }
+  #backdrop.open { display:block; }
+
+  /* ---- phone: three equal tabs at the bottom, sheets slide up ---- */
+  body.mobile #bar { top:auto; bottom:0; height:calc(58px + env(safe-area-inset-bottom));
+                     padding:0 env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left);
+                     gap:0; align-items:stretch; box-shadow:0 -1px 6px rgba(0,0,0,.2); }
+  body.mobile .tab { flex:1 1 0; height:58px; border-radius:0; padding:4px 2px 0; background:transparent;
+                     color:#B9C7DE; flex-direction:column; justify-content:center; gap:2px; font-size:12px;
+                     margin:0; min-width:0; }
+  body.mobile .tab .ico { display:block; font-size:20px; line-height:22px; }
+  body.mobile .tab[aria-selected="true"] { background:transparent; color:#fff; font-weight:700;
+                                           box-shadow:inset 0 3px 0 #F5B301; }
+  body.mobile #routeSelect { display:none; }
+  body.mobile .view { top:0; height:calc(100% - 58px - env(safe-area-inset-bottom)); }
+  body.mobile .menu { top:auto; left:0; right:0; min-width:0; max-width:none;
+                      bottom:calc(58px + env(safe-area-inset-bottom)); max-height:62%;
+                      border:0; border-radius:16px 16px 0 0; box-shadow:0 -6px 24px rgba(0,0,0,.25);
+                      padding-left:env(safe-area-inset-left); padding-right:env(safe-area-inset-right); }
+  body.mobile .menu h2 { display:block; margin:0; padding:14px 18px 8px; font-size:13px; font-weight:600;
+                         color:#6A7890; text-transform:uppercase; letter-spacing:.04em;
+                         position:sticky; top:0; background:#fff; border-radius:16px 16px 0 0; }
+  body.mobile .menu h2::before { content:''; display:block; width:38px; height:5px; border-radius:3px;
+                                 background:#D3D9E3; margin:-4px auto 10px; }
+  body.mobile .menu button { min-height:52px; font-size:17px; padding:0 18px; }
+  body.mobile #backdrop { bottom:calc(58px + env(safe-area-inset-bottom)); }
 </style>
 </head><body>
 <div id="bar" role="tablist">
-  <button id="tab-map" class="tab" role="tab" aria-selected="true">@@MAP_TAB@@</button>
+  <button id="tab-map" class="tab" role="tab" aria-selected="true"><span class="ico" aria-hidden="true">&#128506;&#65039;</span><span class="lbl">@@MAP_TAB@@</span></button>
 @@ROUTES_TAB@@
-  <button id="tab-view" class="tab" aria-haspopup="true" aria-expanded="false">Weergave &#9662;</button>
+  <button id="tab-view" class="tab" aria-haspopup="true" aria-expanded="false"><span class="ico" aria-hidden="true">&#9881;&#65039;</span><span class="lbl">Weergave <span class="caret">&#9662;</span></span></button>
 </div>
-<div id="viewMenu" role="menu"></div>
+<div id="backdrop"></div>
+<div id="routeMenu" class="menu" role="menu"></div>
+<div id="viewMenu" class="menu" role="menu"></div>
 @@FRAMES@@
 <script>
 (function() {
@@ -4888,11 +4951,22 @@ COMBINED_PAGE_TEMPLATE = '''<!DOCTYPE html>
   const tabRoutes = document.getElementById('tab-routes');
   const routeSelect = document.getElementById('routeSelect');
   const tabView = document.getElementById('tab-view');
-  const menu = document.getElementById('viewMenu');
+  const viewMenu = document.getElementById('viewMenu');
+  const routeMenu = document.getElementById('routeMenu');
+  const backdrop = document.getElementById('backdrop');
   let current = 'view-map';
 
+  // phone or computer: a narrow screen, or a touch screen up to tablet size
+  const phoneQuery = window.matchMedia('(max-width: 700px), (pointer: coarse) and (max-width: 1100px)');
+  function applyLayout() {
+    document.body.classList.toggle('mobile', phoneQuery.matches);
+    closeMenus();
+  }
+  if (phoneQuery.addEventListener) phoneQuery.addEventListener('change', applyLayout);
+  else phoneQuery.addListener(applyLayout);
+
   // hide each page's own floating controls while it is embedded here, and
-  // close the menu when someone taps inside a page (another document)
+  // close the menus when someone taps inside a page (another document)
   function embed(frame) {
     try {
       const d = frame.contentDocument;
@@ -4901,7 +4975,7 @@ COMBINED_PAGE_TEMPLATE = '''<!DOCTYPE html>
       st.id = 'embeddedStyle';
       st.textContent = '#controls { display:none !important; }';
       d.head.appendChild(st);
-      d.addEventListener('pointerdown', () => setMenu(false));
+      d.addEventListener('pointerdown', closeMenus);
     } catch (e) {}
   }
   frames.forEach(f => { f.addEventListener('load', () => embed(f)); embed(f); });
@@ -4917,62 +4991,97 @@ COMBINED_PAGE_TEMPLATE = '''<!DOCTYPE html>
       if (!isMap) routeSelect.value = viewId;
     }
     try { history.replaceState(null, '', '#' + viewId.replace('view-', '')); } catch (e) {}
-    if (menu.classList.contains('open')) buildMenu();
+    if (viewMenu.classList.contains('open')) buildViewMenu();
     try { document.getElementById(viewId).contentWindow.focus(); } catch (e) {}
   }
 
-  // the active page's own control buttons, mirrored as menu items
+  function item(menu, markOn, sym, label, onClick) {
+    const b = document.createElement('button');
+    b.setAttribute('role', 'menuitem');
+    b.classList.toggle('on', markOn);
+    const mark = document.createElement('span');
+    mark.className = 'mark';
+    mark.textContent = markOn ? '\\u2713' : '';
+    b.appendChild(mark);
+    if (sym) {
+      const s = document.createElement('span');
+      s.className = 'sym';
+      s.textContent = sym;
+      b.appendChild(s);
+    }
+    const l = document.createElement('span');
+    l.textContent = label;
+    b.appendChild(l);
+    b.addEventListener('click', (e) => { e.stopPropagation(); onClick(); });
+    menu.appendChild(b);
+  }
+  function heading(menu, text) {
+    const h = document.createElement('h2');
+    h.textContent = text;
+    menu.appendChild(h);
+  }
+
+  // Weergave: the active page's own control buttons, mirrored as menu items
   function pageButtons() {
     try {
       const d = document.getElementById(current).contentDocument;
       return Array.from(d.querySelectorAll('#controls button')).filter(b => b.id !== 'controlsToggle');
     } catch (e) { return []; }
   }
-  function buildMenu() {
-    menu.innerHTML = '';
+  function buildViewMenu() {
+    viewMenu.innerHTML = '';
+    heading(viewMenu, 'Weergave');
     pageButtons().forEach(b => {
-      const item = document.createElement('button');
-      item.setAttribute('role', 'menuitem');
       const sym = b.textContent.trim();
       const label = (b.title || '').trim() || sym;
-      const on = b.classList.contains('active');
-      item.classList.toggle('on', on);
-      const mark = document.createElement('span');
-      mark.className = 'mark';
-      mark.textContent = on ? '✓' : '';
-      item.appendChild(mark);
-      if (label !== sym) {
-        const s = document.createElement('span');
-        s.className = 'sym';
-        s.textContent = sym;
-        item.appendChild(s);
-      }
-      const l = document.createElement('span');
-      l.textContent = label;
-      item.appendChild(l);
-      item.addEventListener('click', (e) => {
-        e.stopPropagation();
+      item(viewMenu, b.classList.contains('active'), label !== sym ? sym : '', label, () => {
         b.click();
-        setTimeout(buildMenu, 0);   // states and titles may have changed
+        setTimeout(buildViewMenu, 0);   // states and titles may have changed
       });
-      menu.appendChild(item);
     });
   }
-  function setMenu(open) {
-    menu.classList.toggle('open', open);
-    tabView.setAttribute('aria-expanded', open ? 'true' : 'false');
-    if (open) buildMenu();
+  // Routes on a phone: every route as a big row
+  function buildRouteMenu() {
+    routeMenu.innerHTML = '';
+    heading(routeMenu, 'Routes');
+    Array.from(routeSelect.options).forEach(o => {
+      item(routeMenu, o.value === current, '', o.textContent, () => { show(o.value); closeMenus(); });
+    });
   }
 
-  tabMap.addEventListener('click', () => show('view-map'));
+  function openMenu(menu) {
+    const wasOpen = menu.classList.contains('open');
+    closeMenus();
+    if (wasOpen) return;
+    if (menu === viewMenu) buildViewMenu(); else buildRouteMenu();
+    menu.classList.add('open');
+    backdrop.classList.toggle('open', document.body.classList.contains('mobile'));
+    if (menu === viewMenu) tabView.setAttribute('aria-expanded', 'true');
+  }
+  function closeMenus() {
+    viewMenu.classList.remove('open');
+    routeMenu.classList.remove('open');
+    backdrop.classList.remove('open');
+    tabView.setAttribute('aria-expanded', 'false');
+  }
+
+  tabMap.addEventListener('click', () => { closeMenus(); show('view-map'); });
   if (tabRoutes) {
     routeSelect.addEventListener('change', () => show(routeSelect.value));
-    tabRoutes.addEventListener('click', (e) => { if (e.target !== routeSelect) show(routeSelect.value); });
+    tabRoutes.addEventListener('click', (e) => {
+      e.stopPropagation();
+      if (document.body.classList.contains('mobile')) openMenu(routeMenu);
+      else if (e.target !== routeSelect) { closeMenus(); show(routeSelect.value); }
+    });
   }
-  tabView.addEventListener('click', (e) => { e.stopPropagation(); setMenu(!menu.classList.contains('open')); });
-  document.addEventListener('click', (e) => { if (!menu.contains(e.target)) setMenu(false); });
-  document.addEventListener('keydown', (e) => { if (e.key === 'Escape') setMenu(false); });
+  tabView.addEventListener('click', (e) => { e.stopPropagation(); openMenu(viewMenu); });
+  backdrop.addEventListener('click', closeMenus);
+  document.addEventListener('click', (e) => {
+    if (!viewMenu.contains(e.target) && !routeMenu.contains(e.target)) closeMenus();
+  });
+  document.addEventListener('keydown', (e) => { if (e.key === 'Escape') closeMenus(); });
 
+  applyLayout();
   const fromHash = 'view-' + location.hash.slice(1);
   if (location.hash.length > 1 && document.getElementById(fromHash)) show(fromHash);
 })();
