@@ -79,6 +79,31 @@ def check_river_segments(wb, points_by_id, river_junction_ids, errors):
                               f"not \"brug (rivier)\"")
 
 
+def check_river_junction_degree(wb, warnings):
+    """A confluence or split is where >=3 river stretches meet (two in, one
+    out, or the reverse); anything else (border crossing, name-change,
+    waypoint) is just one river passing through, so needs only 2. Fewer
+    than that means some stretch that should reach this junction doesn't -
+    exactly the RJ007/RJ008 gaps found by hand this session (a tributary's
+    own inflow existed, but nothing carried the main river through)."""
+    rjidx, rjrows = sheet_rows(wb, "River Junctions")
+    rsidx, rsrows = sheet_rows(wb, "River Segments")
+    degree = {}
+    for row in rsrows:
+        degree[row[rsidx["From ID"]]] = degree.get(row[rsidx["From ID"]], 0) + 1
+        degree[row[rsidx["To ID"]]] = degree.get(row[rsidx["To ID"]], 0) + 1
+    for row in rjrows:
+        rid = row[rjidx["River Junction ID"]]
+        if not rid:
+            continue
+        rtype = (row[rjidx["Type"]] or "").lower()
+        expected = 3 if rtype in ("confluence", "split") else 2
+        d = degree.get(rid, 0)
+        if d < expected:
+            warnings.append(f"[River Junctions] {rid} \"{row[rjidx['Name']]}\" (type {rtype or '?'}) "
+                            f"has only {d} connected River Segment(s), expected >= {expected}")
+
+
 def check_orphans(wb, warnings):
     """Nodes nothing ever connects to - not wrong, but worth a look."""
     jidx, jrows = sheet_rows(wb, "Junctions")
@@ -215,6 +240,7 @@ def main():
     # 3. orphans and ambiguous one-sided points (soft)
     check_orphans(wb, warnings)
     check_ambiguous_one_sided_points(wb, warnings)
+    check_river_junction_degree(wb, warnings)
 
     for e in errors:
         print("ERROR:", e)
