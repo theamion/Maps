@@ -1348,6 +1348,42 @@ def one_sided_marker_side(p, fj, tj):
     return 1
 
 
+POINT_END_CLEAR_PX = 10.0  # rendered gap between a junction circle and the nearest point marker
+POINT_STACK_GAP_PX = 9.0   # rendered gap between points nudged off the same junction
+
+
+def declutter_fractions(fracs, length_px, start_clear_px, end_clear_px, gap_px=POINT_STACK_GAP_PX):
+    """Rendered positions (as fractions) for points on one line: a point
+    closer than start/end_clear_px to an end is nudged inwards, and points
+    nudged off the same end keep gap_px between them, in their original
+    order. The data (PositionOnEdge) is not touched - only where it's drawn.
+    When the line has no room for that, every point stays where it is.
+    fracs: {key: fraction}; returns {key: fraction}."""
+    if not fracs or length_px <= 0:
+        return dict(fracs)
+    lo, hi = start_clear_px, length_px - end_clear_px
+    order = sorted(fracs, key=lambda k: fracs[k])
+    if hi - lo < gap_px * (len(order) - 1) + 1:
+        return dict(fracs)
+    d = {k: fracs[k] * length_px for k in order}
+    out = dict(d)
+    prev, prev_moved = None, False
+    for k in order:                      # off the start, pushing forward
+        t = max(d[k], lo)
+        if prev_moved and t < prev + gap_px:
+            t = prev + gap_px
+        prev_moved = t != d[k]
+        out[k], prev = t, t
+    prev, prev_moved = None, False
+    for k in reversed(order):            # off the end, pushing backward
+        t = min(out[k], hi)
+        if prev_moved and t > prev - gap_px:
+            t = prev - gap_px
+        prev_moved = t != out[k]
+        out[k], prev = t, t
+    return {k: min(1.0, max(0.0, v / length_px)) for k, v in out.items()}
+
+
 def point_at_fraction_on_polyline(poly, frac):
     seg_lens = [math.hypot(poly[i+1][0]-poly[i][0], poly[i+1][1]-poly[i][1]) for i in range(len(poly)-1)]
     total = sum(seg_lens)
@@ -1713,6 +1749,8 @@ ROUTE_END_FREE = 0.07     # around a route's own endpoints obstacles don't count
 ROUTE_END_FREE_CELLS = 1.5  # A*: obstacle cells this close to the start/end cell are free
 ROUTE_CROSS_COST = 400.0  # cost of entering an obstacle cell
 ROUTE_TURN_COST = 4.0     # borders: cost of a 90-degree bend (keeps them simple)
+ROUTE_END_TURN_COST = 30.0  # borders: extra cost of a bend right at a crossing, fading out...
+ROUTE_END_TURN_REACH = 0.3  # ...over this share of the border's length, so bends drift to the middle
 BORDER_CLEARANCE = 0.12   # borders keep at least this far from roads, rivers and other borders
 BORDER_END_FREE = 0.25    # ...except this close to their own endpoints (a crossing sits on a road)
 
@@ -1815,10 +1853,12 @@ class ObstacleGrid:
                 self.hard.update(seen)
 
 
-def astar_route(a, b, grid, orthogonal, max_expand=3000000, free_cells=None):
+def astar_route(a, b, grid, orthogonal, max_expand=3000000, free_cells=None, calm_ends=False):
     """Cheapest grid path from a to b. Obstacle cells cost ROUTE_CROSS_COST
     to enter, except within ROUTE_END_FREE of a or b. orthogonal=True:
     4-way moves with a cost per bend (borders); else 8-way moves (rivers).
+    calm_ends=True (borders): a bend costs extra the closer it is to a or b,
+    so bends are placed away from the border crossings.
     Returns a list of cell-centre points, starting at a and ending at b."""
     g = ROUTE_CELL
     cell = lambda p: (int(math.floor(p[0] / g)), int(math.floor(p[1] / g)))
@@ -1831,6 +1871,7 @@ def astar_route(a, b, grid, orthogonal, max_expand=3000000, free_cells=None):
     lo_i, hi_i = min(s[0], t[0]) - pad, max(s[0], t[0]) + pad
     lo_j, hi_j = min(s[1], t[1]) - pad, max(s[1], t[1]) + pad
     free_r = ROUTE_END_FREE_CELLS if free_cells is None else free_cells
+    calm_reach = max(3.0, ROUTE_END_TURN_REACH * span)
 
     def enter_cost(c):
         if grid.cells.get(c, 0) == 0:
@@ -1873,6 +1914,9 @@ def astar_route(a, b, grid, orthogonal, max_expand=3000000, free_cells=None):
             cost = gc + step + enter_cost(n)
             if orthogonal and dirn is not None and ndir != dirn:
                 cost += ROUTE_TURN_COST
+                if calm_ends:
+                    d_end = min(math.hypot(c[0]-s[0], c[1]-s[1]), math.hypot(c[0]-t[0], c[1]-t[1]))
+                    cost += ROUTE_END_TURN_COST * max(0.0, 1.0 - d_end / calm_reach)
             key = (n, ndir if orthogonal else None)
             if cost < best.get(key, math.inf):
                 best[key] = cost
@@ -1971,12 +2015,14 @@ def route_river(a, b, obstacles, grid):
 
 
 def route_border(a, b, obstacles, borders, grid, first_try=None):
-    """A border from a to b: orthogonal legs only. The classic Z/L shapes
-    (and `first_try`, e.g. a tripoint's assigned first direction) are used
-    when they cross nothing and keep clear of roads, rivers and other
-    borders (no running alongside them); otherwise an orthogonal A* path
-    with few bends. `grid` must hold every obstacle with BORDER_CLEARANCE
-    as its margin."""
+    """A border from a to b: orthogonal legs only. Of the classic Z/L shapes
+    (and `first_try`, e.g. a tripoint's assigned first direction) that cross
+    nothing and keep clear of roads, rivers and other borders (no running
+    alongside them), the one with its bends farthest from the two border
+    crossings wins. When that still puts a bend close to a crossing, or no
+    classic shape is valid, an orthogonal A* path that pushes its bends
+    towards the middle joins in. `grid` must hold every obstacle with
+    BORDER_CLEARANCE as its margin."""
     ends = [a, b]
     ax, ay = a
     bx, by = b
@@ -1994,14 +2040,48 @@ def route_border(a, b, obstacles, borders, grid, first_try=None):
     too_close = lambda p: (route_too_close(p, obstacles, ends, free=BORDER_END_FREE)
                            or route_too_close(p, borders, ends, free=BORDER_CLEARANCE * 1.5)
                            or route_overlaps(p, borders))
-    for c in candidates:
-        if route_crossings(c, everything, ends) == 0 and not too_close(c):
-            return c
-    cells = astar_route(a, b, grid, orthogonal=True, free_cells=BORDER_END_FREE / ROUTE_CELL)
-    if not cells:
-        return candidates[0]
-    path = _simplify_orthogonal(cells, a, b)
-    return min([path] + candidates, key=lambda p: (route_crossings(p, everything, ends), too_close(p)))
+    candidates = [_clean_orthogonal(c) for c in candidates]
+    valid = [c for c in candidates if route_crossings(c, everything, ends) == 0 and not too_close(c)]
+    # keep the area around a crossing calm: of the valid shapes, take the one
+    # whose nearest bend is farthest from either end (fewest bends on a tie)
+    rank = lambda p: (_bend_clearance(p), -len(p))
+    span = math.hypot(bx - ax, by - ay)
+    if valid and _bend_clearance(max(valid, key=rank)) >= ROUTE_END_TURN_REACH * span:
+        return max(valid, key=rank)
+    cells = astar_route(a, b, grid, orthogonal=True, free_cells=BORDER_END_FREE / ROUTE_CELL, calm_ends=True)
+    if cells:
+        path = _clean_orthogonal(_simplify_orthogonal(cells, a, b))
+        if route_crossings(path, everything, ends) == 0 and not too_close(path):
+            valid.append(path)
+        else:
+            candidates.append(path)
+    if valid:
+        return max(valid, key=rank)
+    return min(candidates, key=lambda p: (route_crossings(p, everything, ends), too_close(p)))
+
+
+def _clean_orthogonal(path):
+    """Drop repeated points and corners that aren't real bends."""
+    out = [path[0]]
+    for p in path[1:]:
+        if math.hypot(p[0]-out[-1][0], p[1]-out[-1][1]) > 1e-9:
+            out.append(p)
+    i = 1
+    while i < len(out) - 1:
+        p, q, r = out[i-1], out[i], out[i+1]
+        if abs((q[0]-p[0])*(r[1]-q[1]) - (q[1]-p[1])*(r[0]-q[0])) < 1e-12:
+            out.pop(i)
+        else:
+            i += 1
+    return out
+
+
+def _bend_clearance(path):
+    """Distance from the bend nearest to either end of `path` to that end
+    (infinite for a straight line)."""
+    a, b = path[0], path[-1]
+    return min((min(math.hypot(p[0]-a[0], p[1]-a[1]), math.hypot(p[0]-b[0], p[1]-b[1]))
+                for p in path[1:-1]), default=math.inf)
 
 
 # ------------------------------------------------------------- regions ---
@@ -2213,6 +2293,26 @@ def render_map(junctions, segments, pos, roads, points, border_data, border_node
     # river geometry are fully known, borders can properly dodge everything
     # except their own crossing-point endpoints. Both are still inserted
     # into the SVG near the start, so they render underneath roads/points.
+    # where each point is DRAWN along its road: nudged away from a junction
+    # circle it would otherwise sit on (PositionOnEdge itself is unchanged).
+    # Everything below - markers, labels, river bridge ends - uses this.
+    shown_frac = {}
+    pts_on_edge = defaultdict(list)
+    for p in points:
+        pts_on_edge[p['edge_id']].append(p)
+    for seg in segments:
+        poly = polylines.get(seg['edge_id'])
+        if not poly or not pts_on_edge.get(seg['edge_id']):
+            continue
+        length_px = sum(math.hypot(q[0]-p[0], q[1]-p[1]) for p, q in zip(poly, poly[1:])) * CANVAS_SCALE
+        clear = lambda jid: (TIER_STYLE.get((junctions.get(jid) or {}).get('tier'), TIER_STYLE['Medium'])['radius_px']
+                             + POINT_END_CLEAR_PX)
+        # river bridges stay exactly where they are: a river must end on its
+        # bridge, and moving that end re-routes the whole river
+        movable = {p['id']: p['pos_on_edge'] for p in pts_on_edge[seg['edge_id']]
+                   if (p['category'] or '').lower() != 'brug (rivier)'}
+        shown_frac.update(declutter_fractions(movable, length_px, clear(seg['from']), clear(seg['to'])))
+
     river_svg_paths = []
     river_sampled_polys = []
     road_polylines_list = list(polylines.values())
@@ -2230,7 +2330,7 @@ def render_map(junctions, segments, pos, roads, points, border_data, border_node
         for p in points:
             poly = polylines.get(p['edge_id'])
             if p['id'] in river_pos and poly:
-                river_pos[p['id']] = point_at_fraction_on_polyline(poly, p['pos_on_edge'])[0]
+                river_pos[p['id']] = point_at_fraction_on_polyline(poly, shown_frac.get(p['id'], p['pos_on_edge']))[0]
         for seg in river_data.get('segments', []):
             a, b = river_pos.get(seg['from']), river_pos.get(seg['to'])
             if not a or not b:
@@ -2449,7 +2549,7 @@ def render_map(junctions, segments, pos, roads, points, border_data, border_node
             continue
         fj, tj = junctions.get(seg['from']), junctions.get(seg['to'])
         for p in via_by_edge.get(seg['edge_id'], []):
-            (px, py), ang = point_at_fraction_on_polyline(poly, p['pos_on_edge'])
+            (px, py), ang = point_at_fraction_on_polyline(poly, shown_frac.get(p['id'], p['pos_on_edge']))
             sx, sy = X(px), Y(py)
             cat = (p['category'] or '').lower()
             info = point_badge_info.get(p['id']) if cat in ('tankstation', 'autohof') else None
@@ -2569,7 +2669,7 @@ def render_map(junctions, segments, pos, roads, points, border_data, border_node
             # sticks out past the road's casing width remains visible
             fj, tj = junctions.get(seg['from']), junctions.get(seg['to'])
             for p in via_by_edge.get(seg['edge_id'], []):
-                (px, py), ang = point_at_fraction_on_polyline(poly, p['pos_on_edge'])
+                (px, py), ang = point_at_fraction_on_polyline(poly, shown_frac.get(p['id'], p['pos_on_edge']))
                 sx, sy = X(px), Y(py)
                 cat = (p['category'] or '').lower()
                 tier = marker_tier.get(p['id'])
@@ -2902,7 +3002,7 @@ def build_map(xlsx_path=DEFAULT_XLSX, title="Geographic Spine Map", tube_style_h
   #stage.labels-visible.bridges-on .bridge-length-label {{ display:none; }}
   .debug-label {{ display:none; }}
   #stage.debug-mode .debug-label {{ display:block; }}
-  /* segment/point distances - own zoom-gated toggle, off by default */
+  /* segment/point distances - own zoom-gated toggle, on by default */
   .dist-label {{ display:none; }}
   #stage.labels-visible.distances-on .dist-label {{ display:block; }}
   /* points of interest: own toggle, visible at every zoom level */
@@ -2919,14 +3019,14 @@ def build_map(xlsx_path=DEFAULT_XLSX, title="Geographic Spine Map", tube_style_h
     <button id="zoomReset" title="Reset">&#8634;</button>
     <button id="debugToggle" title="Debug aan/uit">D</button>
     <button id="bridgeToggle" title="Brug/tunnel namen">B</button>
-    <button id="distToggle" title="Afstanden aan/uit">Km</button>
+    <button id="distToggle" class="active" title="Afstanden aan/uit">Km</button>
     <button id="poiToggle" class="active" title="Bezienswaardigheden aan/uit">&#9733;</button>
     <button id="gpsToggle" title="Mijn locatie volgen">&#128205;</button>
     <button id="legendToggle" title="Legenda aan/uit">L</button>
   </div>
 </div>
 {legend_html}
-<div id="wrap"><div id="stage" class="pois-on">{svg}</div></div>
+<div id="wrap"><div id="stage" class="pois-on distances-on">{svg}</div></div>
 <script>
 (function() {{
   const wrap = document.getElementById('wrap');
@@ -4133,8 +4233,17 @@ def render_graph(junctions, seg_by_pair, points_by_edge, node_x, node_lane, edge
         if seg:
             reversed_dir = seg["from_id"] != u
             fuel_stops = []   # (fraction along the drawn line, km from its start)
-            for pt in points_by_edge.get(seg["edge_id"], []):
-                frac = pt["pos"] if not reversed_dir else (1 - pt["pos"])
+            # drawn positions: nudged off the junction circles at both ends
+            # (the km values below still use the real position)
+            edge_pts = points_by_edge.get(seg["edge_id"], [])
+            shown = declutter_fractions(
+                {i: (pt["pos"] if not reversed_dir else 1 - pt["pos"]) for i, pt in enumerate(edge_pts)},
+                math.hypot(x2 - x1, y2 - y1),
+                TIER_RADIUS.get(ju["tier"], 6.0) + GRAPH_FUEL_HALF + 4,
+                TIER_RADIUS.get(jv["tier"], 6.0) + GRAPH_FUEL_HALF + 4)
+            for i, pt in enumerate(edge_pts):
+                frac = shown[i]
+                real_frac = pt["pos"] if not reversed_dir else (1 - pt["pos"])
                 px_pt = x1 + frac * (x2 - x1)
                 py_pt = y1 + frac * (y2 - y1)
                 line_angle = math.degrees(math.atan2(y2 - y1, x2 - x1))
@@ -4155,7 +4264,7 @@ def render_graph(junctions, seg_by_pair, points_by_edge, node_x, node_lane, edge
                                     px_pt + GRAPH_FUEL_HALF, py_pt + GRAPH_FUEL_HALF))
                     pending_points.append((px_pt, py_pt, line_angle, pt))
                     km = pt.get("from_start_km")
-                    km = (frac * seg["distance_km"] if km is None
+                    km = (real_frac * seg["distance_km"] if km is None
                           else (km if not reversed_dir else seg["distance_km"] - km))
                     fuel_stops.append((frac, km))
                 elif pt["category"] == "poi":
@@ -4505,9 +4614,9 @@ HTML_TEMPLATE = """<!DOCTYPE html>
 <div id="controls">
   <button id="controlsToggle" title="Opties tonen/verbergen">&#9776;</button>
   <div id="controlsPanel">
-    <button id="zoomIn">+</button>
-    <button id="zoomOut">&minus;</button>
-    <button id="zoomReset">reset</button>
+    <button id="zoomIn" title="Inzoomen">+</button>
+    <button id="zoomOut" title="Uitzoomen">&minus;</button>
+    <button id="zoomReset" title="Reset">&#8634;</button>
     <button id="toggleFuel" class="active">Tankstations</button>
     <button id="toggleBridges">Bruggen/tunnels</button>
     <button id="toggleDist" class="active">Afstanden</button>
@@ -4695,61 +4804,178 @@ def build_graph_page(xlsx_path=DEFAULT_XLSX, start_name=DEFAULT_FROM,
 # =====================================================================
 
 def combine_pages(map_html, routes, map_tab, page_title):
-    """The map and every route diagram as separate documents in one file:
-    each sits in its own iframe (srcdoc), so their ids, styles and scripts
-    can't collide. All frames keep their full size (hidden with visibility,
-    not display), so each view's initial fit and zoom state survive
-    switching tabs. routes: list of (tab title, page html); their tabs are
-    #route, #route2, #route3, ..."""
+    """The map and every route diagram as separate documents in one file,
+    each in its own iframe (srcdoc), so their ids, styles and scripts can't
+    collide. All frames keep their full size (hidden with visibility, not
+    display), so each view's fit and zoom survive switching.
+
+    Top bar: "Kaart", "Routes" (a choice list of every route) and
+    "Weergave" (a dropdown with the view options of whichever page is
+    showing). That dropdown is built from the active page's own control
+    buttons and clicks them, so all their logic stays in the page; the
+    pages' own floating control panels are hidden while embedded.
+    routes: list of (title, page html); addresses #map, #route, #route2, ..."""
     esc = lambda s: html_lib.escape(s, quote=True)
     views = [("map", map_tab, map_html, ' allow="geolocation"')]
     views += [("route" if i == 0 else f"route{i + 1}", title, page, "") for i, (title, page) in enumerate(routes)]
-    tab_buttons = "\n".join(
-        f'  <button role="tab" id="tab-{vid}" data-view="view-{vid}" aria-selected="{str(i == 0).lower()}">'
-        f'{esc(title)}</button>' for i, (vid, title, _p, _a) in enumerate(views))
+    route_options = "\n".join(
+        '      <option value="view-%s">%s</option>' % (vid, esc(re.sub(r"^Route:\s*", "", title)))
+        for vid, title, _p, _a in views[1:])
     frames = "\n".join(
-        f'<iframe id="view-{vid}" class="view{" active" if i == 0 else ""}" title="{esc(title)}"{attr} '
-        f'srcdoc="{esc(page)}"></iframe>' for i, (vid, title, page, attr) in enumerate(views))
-    return f'''<!DOCTYPE html>
+        '<iframe id="view-%s" class="view%s" title="%s"%s srcdoc="%s"></iframe>'
+        % (vid, " active" if i == 0 else "", esc(title), attr, esc(page))
+        for i, (vid, title, page, attr) in enumerate(views))
+    routes_tab = ''
+    if routes:
+        routes_tab = ('  <div id="tab-routes" class="tab" role="tab" aria-selected="false">\n'
+                      '    <label for="routeSelect">Routes</label>\n'
+                      '    <select id="routeSelect" aria-label="Kies een route">\n'
+                      + route_options + '\n    </select>\n  </div>')
+    return (COMBINED_PAGE_TEMPLATE
+            .replace('@@TITLE@@', esc(page_title))
+            .replace('@@MAP_TAB@@', esc(map_tab))
+            .replace('@@ROUTES_TAB@@', routes_tab)
+            .replace('@@FRAMES@@', frames))
+
+
+# plain string with @@...@@ placeholders (no str.format: the CSS/JS braces
+# would all need doubling)
+COMBINED_PAGE_TEMPLATE = '''<!DOCTYPE html>
 <html lang="nl"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>{esc(page_title)}</title>
+<title>@@TITLE@@</title>
 <style>
-  html, body {{ margin:0; height:100%; overflow:hidden; background:#f0efe9;
-               font-family: Arial, Helvetica, sans-serif; }}
-  #tabs {{ position:absolute; top:0; left:0; right:0; height:40px; display:flex; gap:4px;
-           padding:6px 8px 0; box-sizing:border-box; background:#1B3A6B;
-           overflow-x:auto; -webkit-overflow-scrolling:touch; scrollbar-width:none; }}
-  #tabs::-webkit-scrollbar {{ display:none; }}
-  #tabs button {{ border:0; border-radius:6px 6px 0 0; padding:0 16px; font-size:14px; cursor:pointer;
-                  background:#3A5A8C; color:#DDE6F3; white-space:nowrap; flex:0 0 auto; min-height:34px; }}
-  #tabs button[aria-selected="true"] {{ background:#f0efe9; color:#1B3A6B; font-weight:700; }}
-  .view {{ position:absolute; top:40px; left:0; width:100%; height:calc(100% - 40px); border:0;
-           visibility:hidden; }}
-  .view.active {{ visibility:visible; }}
+  html, body { margin:0; height:100%; overflow:hidden; background:#f0efe9;
+               font-family: Arial, Helvetica, sans-serif; }
+  #bar { position:absolute; top:0; left:0; right:0; height:44px; display:flex; gap:4px; align-items:flex-end;
+         padding:6px 8px 0; box-sizing:border-box; background:#1B3A6B; z-index:20; }
+  .tab { border:0; border-radius:6px 6px 0 0; padding:0 14px; font-size:14px; cursor:pointer;
+         background:#3A5A8C; color:#DDE6F3; white-space:nowrap; height:38px; display:flex; align-items:center;
+         gap:8px; box-sizing:border-box; font-family:inherit; }
+  .tab[aria-selected="true"] { background:#f0efe9; color:#1B3A6B; font-weight:700; }
+  #tab-routes { min-width:0; flex:0 1 auto; }
+  #tab-routes label { cursor:pointer; }
+  #routeSelect { min-width:0; max-width:46vw; font-size:14px; padding:4px 6px; border-radius:5px;
+                 border:1px solid #9AA9C2; background:#fff; color:#1B3A6B; }
+  #tab-view { margin-left:auto; }
+  #viewMenu { position:absolute; top:44px; right:8px; z-index:30; display:none; min-width:230px;
+              max-width:calc(100vw - 16px); max-height:calc(100% - 60px); overflow-y:auto; background:#fff;
+              border:1px solid #9AA9C2; border-radius:0 0 8px 8px; box-shadow:0 6px 18px rgba(0,0,0,.18); }
+  #viewMenu.open { display:block; }
+  #viewMenu button { display:flex; align-items:center; gap:10px; width:100%; min-height:44px; padding:0 14px;
+                     border:0; border-bottom:1px solid #eef0f4; background:#fff; color:#1B3A6B; font-size:15px;
+                     text-align:left; cursor:pointer; font-family:inherit; }
+  #viewMenu button:last-child { border-bottom:0; }
+  #viewMenu button .mark { width:18px; text-align:center; font-weight:700; color:#2C6BD1; }
+  #viewMenu button .sym { min-width:24px; text-align:center; color:#555; }
+  #viewMenu button.on { background:#EEF3FB; }
+  .view { position:absolute; top:44px; left:0; width:100%; height:calc(100% - 44px); border:0;
+          visibility:hidden; }
+  .view.active { visibility:visible; }
 </style>
 </head><body>
-<div id="tabs" role="tablist">
-{tab_buttons}
+<div id="bar" role="tablist">
+  <button id="tab-map" class="tab" role="tab" aria-selected="true">@@MAP_TAB@@</button>
+@@ROUTES_TAB@@
+  <button id="tab-view" class="tab" aria-haspopup="true" aria-expanded="false">Weergave &#9662;</button>
 </div>
-{frames}
+<div id="viewMenu" role="menu"></div>
+@@FRAMES@@
 <script>
-(function() {{
-  const tabs = Array.from(document.querySelectorAll('#tabs button'));
-  function show(viewId) {{
-    tabs.forEach(t => {{
-      const on = t.dataset.view === viewId;
-      t.setAttribute('aria-selected', on ? 'true' : 'false');
-      document.getElementById(t.dataset.view).classList.toggle('active', on);
-    }});
-    try {{ history.replaceState(null, '', '#' + viewId.replace('view-', '')); }} catch (e) {{}}
-    const frame = document.getElementById(viewId);
-    try {{ frame.contentWindow.focus(); }} catch (e) {{}}
-  }}
-  tabs.forEach(t => t.addEventListener('click', () => show(t.dataset.view)));
-  const fromHash = document.getElementById('view-' + location.hash.slice(1));
-  if (location.hash.length > 1 && fromHash) show(fromHash.id);
-}})();
+(function() {
+  const frames = Array.from(document.querySelectorAll('iframe.view'));
+  const tabMap = document.getElementById('tab-map');
+  const tabRoutes = document.getElementById('tab-routes');
+  const routeSelect = document.getElementById('routeSelect');
+  const tabView = document.getElementById('tab-view');
+  const menu = document.getElementById('viewMenu');
+  let current = 'view-map';
+
+  // hide each page's own floating controls while it is embedded here, and
+  // close the menu when someone taps inside a page (another document)
+  function embed(frame) {
+    try {
+      const d = frame.contentDocument;
+      if (!d || !d.getElementById('controls') || d.getElementById('embeddedStyle')) return;
+      const st = d.createElement('style');
+      st.id = 'embeddedStyle';
+      st.textContent = '#controls { display:none !important; }';
+      d.head.appendChild(st);
+      d.addEventListener('pointerdown', () => setMenu(false));
+    } catch (e) {}
+  }
+  frames.forEach(f => { f.addEventListener('load', () => embed(f)); embed(f); });
+
+  function show(viewId) {
+    if (!document.getElementById(viewId)) return;
+    current = viewId;
+    frames.forEach(f => f.classList.toggle('active', f.id === viewId));
+    const isMap = viewId === 'view-map';
+    tabMap.setAttribute('aria-selected', isMap ? 'true' : 'false');
+    if (tabRoutes) {
+      tabRoutes.setAttribute('aria-selected', isMap ? 'false' : 'true');
+      if (!isMap) routeSelect.value = viewId;
+    }
+    try { history.replaceState(null, '', '#' + viewId.replace('view-', '')); } catch (e) {}
+    if (menu.classList.contains('open')) buildMenu();
+    try { document.getElementById(viewId).contentWindow.focus(); } catch (e) {}
+  }
+
+  // the active page's own control buttons, mirrored as menu items
+  function pageButtons() {
+    try {
+      const d = document.getElementById(current).contentDocument;
+      return Array.from(d.querySelectorAll('#controls button')).filter(b => b.id !== 'controlsToggle');
+    } catch (e) { return []; }
+  }
+  function buildMenu() {
+    menu.innerHTML = '';
+    pageButtons().forEach(b => {
+      const item = document.createElement('button');
+      item.setAttribute('role', 'menuitem');
+      const sym = b.textContent.trim();
+      const label = (b.title || '').trim() || sym;
+      const on = b.classList.contains('active');
+      item.classList.toggle('on', on);
+      const mark = document.createElement('span');
+      mark.className = 'mark';
+      mark.textContent = on ? '✓' : '';
+      item.appendChild(mark);
+      if (label !== sym) {
+        const s = document.createElement('span');
+        s.className = 'sym';
+        s.textContent = sym;
+        item.appendChild(s);
+      }
+      const l = document.createElement('span');
+      l.textContent = label;
+      item.appendChild(l);
+      item.addEventListener('click', (e) => {
+        e.stopPropagation();
+        b.click();
+        setTimeout(buildMenu, 0);   // states and titles may have changed
+      });
+      menu.appendChild(item);
+    });
+  }
+  function setMenu(open) {
+    menu.classList.toggle('open', open);
+    tabView.setAttribute('aria-expanded', open ? 'true' : 'false');
+    if (open) buildMenu();
+  }
+
+  tabMap.addEventListener('click', () => show('view-map'));
+  if (tabRoutes) {
+    routeSelect.addEventListener('change', () => show(routeSelect.value));
+    tabRoutes.addEventListener('click', (e) => { if (e.target !== routeSelect) show(routeSelect.value); });
+  }
+  tabView.addEventListener('click', (e) => { e.stopPropagation(); setMenu(!menu.classList.contains('open')); });
+  document.addEventListener('click', (e) => { if (!menu.contains(e.target)) setMenu(false); });
+  document.addEventListener('keydown', (e) => { if (e.key === 'Escape') setMenu(false); });
+
+  const fromHash = 'view-' + location.hash.slice(1);
+  if (location.hash.length > 1 && document.getElementById(fromHash)) show(fromHash);
+})();
 </script>
 </body></html>
 '''

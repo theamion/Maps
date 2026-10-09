@@ -74,7 +74,7 @@ Excel before running them.
 
 ## mapmaking.py: map and route diagram
 
-Builds one HTML page with a map tab and one tab per route in `ROUTE_TABS`:
+Builds one HTML page with three tabs: **Kaart**, **Routes** (a choice list with one diagram per route in `ROUTE_TABS`) and **Weergave** (the view options of the page you are looking at):
 
 - **Kaart:** the whole network as a schematic map that stays close to real
   geography. It has zoom, a GPS button, and toggles for bridge names (B),
@@ -101,7 +101,7 @@ python3 mapmaking.py --from Vught --to Berwang --via "Venlo,Koblenz"
 ```
 
 Open `holidays.html` in a browser. Adding `#route` to the address opens the
-first route tab directly, `#route2` the second, and so on.
+first route directly, `#route2` the second, and so on (`#map` for the map).
 
 The route tabs are defined in `ROUTE_TABS` at the top of `mapmaking.py`. Each
 entry has a destination (`to`), optionally its own start (`from`, default
@@ -324,17 +324,22 @@ its own small fixed-position SVG, not part of the zoomable `#stage`, so it
 stays a constant, legible size and never blocks map panning/zooming
 (`pointer-events:none`) regardless of the map's own zoom level.
 
-### Controls panel (Kaart and Route)
+### Tabs and view options
 
-All the per-view toggle/zoom buttons (zoom, legend, bridge/POI/distance
-toggles, GPS, debug) live behind a single &#9776; button, collapsed by
-default, instead of sitting on screen the whole time - every one of them
-still works exactly the same once opened (same ids, same click handlers),
-only the container around them is collapsible. This keeps them from
-covering the route/map itself when you've panned or zoomed into a corner,
-since a collapsed panel has nothing to overlap with. Route diagrams also get
-extra blank margin around the canvas itself (`MARGIN_PX`), so there's more
-natural empty space for the panel to sit over even before you open it.
+The top bar has three tabs:
+
+- **Kaart** shows the map.
+- **Routes** has a choice list of every route; picking one shows its
+  diagram. On a phone it opens the native picker.
+- **Weergave** opens a menu with the view options of the page you're looking
+  at: zoom, bridge/tunnel names, distances, points of interest, fuel
+  stations, GPS, legend or debug, depending on the page. A checkmark shows
+  what's on.
+
+That menu is built from each page's own control buttons and clicks them, so
+all their behaviour lives in the page itself. When a page is shown inside
+`holidays.html`, its own floating &#9776; panel is hidden. Opened on its own,
+it keeps that panel. **Afstanden** (distances) is on by default in every view.
 
 ### How the map layout works
 
