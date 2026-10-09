@@ -259,7 +259,7 @@ def brand_badge_entries(fuel_text, food_text, facilities_text, max_food=4):
         return data.get(side, []) if mode == 'sided' else data  # single: same list every side
 
     out = {}
-    for side in sides:
+    for side in sorted(sides):
         seen = set()
         fuel_here = side_brands(fuel_mode, fuel_data, side)
         food_here = side_brands(food_mode, food_data, side)

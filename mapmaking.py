@@ -1214,7 +1214,11 @@ def assign_road_colours(segments, palette, pos=None, X=None, Y=None, base_separa
         return lab_cache[c]
 
     usable = [c for c in palette if c != NAVY_BLUE]
-    order = sorted((k for k in road_keys if k not in colours), key=lambda k: -imp.get(k, 0.0))
+    # road_keys is a set (non-deterministic iteration order across Python
+    # processes - string hash randomization), so ties in importance need a
+    # secondary key or which of two equally-important roads gets which
+    # colour would vary build to build
+    order = sorted((k for k in road_keys if k not in colours), key=lambda k: (-imp.get(k, 0.0), k))
 
     for key in order:
         constraints = [(colours[n], r) for n in colours if n != key
